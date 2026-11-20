@@ -1,6 +1,5 @@
 plugins {
     id 'com.android.application'
-    id 'org.jetbrains.kotlin.android'
     id 'org.jetbrains.kotlin.plugin.compose'
     id 'org.jetbrains.kotlin.plugin.serialization'
     id 'com.google.devtools.ksp'
@@ -8,7 +7,7 @@ plugins {
 
 android {
     namespace 'com.vpnx.dope'
-    compileSdk 36
+    compileSdk 37
 
     defaultConfig {
         applicationId "com.vpnx.dope"
@@ -52,12 +51,15 @@ android {
         targetCompatibility JavaVersion.VERSION_21
     }
 
-    kotlinOptions {
-        jvmTarget = '21'
-        freeCompilerArgs += [
-            "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi",
-            "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api"
-        ]
+    // AGP 9 built-in Kotlin: android.kotlinOptions is gone; use kotlin.compilerOptions
+    kotlin {
+        compilerOptions {
+            jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21
+            freeCompilerArgs.addAll([
+                "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi",
+                "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api"
+            ])
+        }
     }
 
     buildFeatures {
@@ -109,10 +111,10 @@ dependencies {
     implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
     implementation 'org.bouncycastle:bcpkix-jdk18on:1.78.1'
 
-    // Room Database 2.6.1
-    implementation 'androidx.room:room-runtime:2.6.1'
-    implementation 'androidx.room:room-ktx:2.6.1'
-    ksp 'androidx.room:room-compiler:2.6.1'
+    // Room Database 2.7.0 (Kotlin 2.2 era; 2.6.1 predates Kotlin 2.2)
+    implementation 'androidx.room:room-runtime:2.7.0'
+    implementation 'androidx.room:room-ktx:2.7.0'
+    ksp 'androidx.room:room-compiler:2.7.0'
 
     // KotlinX Serialization & Coroutines
     implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3'
