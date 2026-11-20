@@ -38,7 +38,7 @@ jobs:
       # The Gradle wrapper jar is generated in CI (it is a binary and is not
       # committed through the repo's file sync). Same approach Albert used.
       - name: Generate Gradle wrapper (9.9.2)
-        run: gradle wrapper --gradle-version 9.9.2
+        run: gradle wrapper --gradle-version 9.9.2 --gradle-distribution-sha256-sum 971fcd7150ca4ba04852c0b2ca0d2d0ab9468e14b03473eab19528809914c76b
 
       - name: Make wrapper executable
         run: chmod +x ./gradlew
