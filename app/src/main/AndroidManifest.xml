@@ -23,6 +23,7 @@
         tools:ignore="QueryAllPackagesPermission" />
 
     <application
+        android:name=".VpnxApplication"
         android:allowBackup="true"
         android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"

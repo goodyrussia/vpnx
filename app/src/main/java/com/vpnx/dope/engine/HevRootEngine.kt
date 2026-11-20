@@ -86,14 +86,58 @@ object HevRootEngine {
 
     // ------------------------------------------------------------------ root
 
-    /** True only when the libsu shell reports root. First call may show the
-     * root permission prompt; give the user 30s to answer it. */
+    /**
+     * True only when libsu's root shell confirms uid=0. First call will
+     * trigger the KernelSU/Magisk grant dialog if no shell has been
+     * opened yet; give the user 30 s to respond.
+     *
+     * Diagnostic detail is logged so the caller can see *why* root was
+     * denied (Shell.isAppGrantedRoot() returns null = not yet asked,
+     * false = explicitly denied/unavailable, true = already granted).
+     * Shell.rootAccess() is deprecated in libsu 5.x in favour of
+     * Shell.getShell().isRoot(), which is what we use here.
+     */
     fun isRootAvailable(): Boolean {
         return try {
             val future = rootExecutor.submit<Boolean> {
                 try {
-                    Shell.rootAccess()
-                } catch (_: Throwable) {
+                    // isAppGrantedRoot() is non-blocking and tells us the
+                    // cached state before we touch the shell.
+                    val cached = Shell.isAppGrantedRoot()
+                    if (cached == false) {
+                        // libsu already knows root is impossible for this UID.
+                        VpnStateBridge.addLog(
+                            "Root mode: su binary denied access for this app. " +
+                                "Open KernelSU Manager → SuperUser → find com.vpnx.dope → " +
+                                "enable root access, then retry."
+                        )
+                        return@submit false
+                    }
+                    // cached == null (undetermined) or true: open the shell.
+                    // This is the call that shows the KernelSU dialog when
+                    // the grant has not been given yet. Builder is configured
+                    // in VpnxApplication with FLAG_MOUNT_MASTER + 10 s timeout.
+                    val shell = Shell.getShell()
+                    if (!shell.isRoot) {
+                        val newCached = Shell.isAppGrantedRoot()
+                        if (newCached == false) {
+                            VpnStateBridge.addLog(
+                                "Root mode: su access denied by KernelSU for com.vpnx.dope. " +
+                                    "Grant root in KernelSU Manager, then retry."
+                            )
+                        } else {
+                            VpnStateBridge.addLog(
+                                "Root mode: shell opened but uid is not 0 " +
+                                    "(su binary may be missing or non-functional on this ROM)."
+                            )
+                        }
+                        return@submit false
+                    }
+                    true
+                } catch (t: Throwable) {
+                    VpnStateBridge.addLog(
+                        "Root mode: exception opening root shell — ${t.javaClass.simpleName}: ${t.message}"
+                    )
                     false
                 }
             }
@@ -101,7 +145,8 @@ object HevRootEngine {
         } catch (_: TimeoutException) {
             VpnStateBridge.addLog("Root mode: root check timed out (did you grant root when asked?).")
             false
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            VpnStateBridge.addLog("Root mode: unexpected error in root check — ${t.message}")
             false
         }
     }
