@@ -1,0 +1,11 @@
+*.keystore
+*.p12
+*.jks
+local.properties
+.gradle/
+build/
+app/build/
+app/src/main/jniLibs/
+*.apk
+update.json
+.DS_Store
