@@ -1,0 +1,14 @@
+*.iml
+.gradle/
+local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/app/src/main/jniLibs/
+captures/
+.externalNativeBuild/
+.cxx/
+*.p12
+*.jks
+keystore.properties
