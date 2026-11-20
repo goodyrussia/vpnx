@@ -57,7 +57,12 @@ android {
             jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21
             freeCompilerArgs.addAll([
                 "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi",
-                "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api"
+                "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
+                // Miuix 0.9.4 + kotlin-stdlib 2.4.20 were compiled with
+                // Kotlin 2.4.0 metadata; AGP 9.1.1's embedded compiler is
+                // 2.2.10 and refuses them. The build error itself offers
+                // this flag. Revisit if a 2.4-only declaration breaks.
+                "-Xskip-metadata-version-check"
             ])
         }
     }
