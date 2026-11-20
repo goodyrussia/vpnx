@@ -251,6 +251,9 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
     implementation 'com.google.code.gson:gson:2.10.1'
 
+    // libsu (topjohnwu) — persistent root shell for hev root mode.
+    implementation 'com.github.topjohnwu.libsu:core:5.2.2'
+
     // SSHJ + BouncyCastle 1.76
     implementation 'com.hierynomus:sshj:0.38.0'
     implementation 'org.bouncycastle:bcprov-jdk18on:1.76'

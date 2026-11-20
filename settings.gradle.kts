@@ -10,6 +10,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // libsu (root shell) is published via JitPack.
+        maven { url = uri("https://jitpack.io") }
     }
 }
 rootProject.name = "vpnx"

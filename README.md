@@ -24,10 +24,14 @@ Settings → Tunnel Mode, applies on the next connect:
 - **Root (hev)** — runs the hev-socks5-tunnel CLI executable as root, which
   creates the `vpnx0` TUN interface and forwards packets to the local SOCKS5
   server the proxy engines already run. No VpnService, no VPN permission
-  prompt. Needs a rooted device (KernelSU / Magisk); the proxy's own
-  outbound traffic is kept out of the tunnel by policy routing (uidrange,
-  iptables owner-mark fallback), and a watchdog stops the tunnel cleanly if
-  hev dies. All routing is removed on disconnect.
+  prompt. Needs a rooted device (KernelSU / Magisk); grant root when asked
+  on first connect. Root commands go through libsu's persistent shell and
+  hev is launched with nohup + setsid so it survives the shell that started
+  it. The proxy's own outbound traffic is kept out of the tunnel by policy
+  routing (uidrange, iptables owner-mark fallback), and a watchdog stops the
+  tunnel cleanly if hev dies. All routing is removed on disconnect. A failed
+  start prints diagnostics to the log (app-side vs root-side view of vpnx0,
+  routing rules, hev process, hev log).
 
 ## Status
 

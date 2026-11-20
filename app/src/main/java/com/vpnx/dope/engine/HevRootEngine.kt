@@ -2,11 +2,15 @@ package com.vpnx.dope.engine
 
 import android.content.Context
 import android.os.Process
+import com.topjohnwu.superuser.Shell
 import com.vpnx.dope.ui.viewmodel.VpnStateBridge
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipFile
 
@@ -24,9 +28,16 @@ import java.util.zip.ZipFile
  * owner-mark rule as fallback), and hev marks its own sockets with the
  * fwmark from its config.
  *
+ * Root access goes through libsu (topjohnwu): one persistent root shell for
+ * the app's lifetime, instead of a fresh `su -c` per command. That matters
+ * here — a daemon started from a one-shot `su -c` session can be killed
+ * when that session ends, which is exactly how v1.0.2 failed on-device
+ * (script exited 0, vpnx0 never visible afterwards). libsu's shell stays
+ * alive, and hev is launched with nohup + setsid inside it.
+ *
  * Strictly separate from the VpnService path: this object is only ever
  * called when the persisted tunnel mode is ROOT, and the VpnService path
- * never executes a root command.
+ * never executes a root command. All libsu calls run off the main thread.
  *
  * Routing (all via a root shell script, verified after applying):
  *   ip rule add uidrange <uid>-<uid> lookup main pref 5   (app traffic direct)
@@ -66,12 +77,59 @@ object HevRootEngine {
     private val watchdogStop = AtomicBoolean(false)
     private var watchdogThread: Thread? = null
 
+    /** Last liveness detail, for the failure log (tun visible / socks open). */
+    @Volatile private var lastTunOk = false
+    @Volatile private var lastSocksOk = false
+
+    /** Serializes all root-shell work onto one thread. Never the main thread. */
+    private val rootExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+
     // ------------------------------------------------------------------ root
 
-    /** True only when `su -c id` reports uid=0 within the timeout. */
+    /** True only when the libsu shell reports root. First call may show the
+     * root permission prompt; give the user 30s to answer it. */
     fun isRootAvailable(): Boolean {
-        val (code, out) = runCmd(arrayOf("su", "-c", "id"), 10)
-        return code == 0 && out.contains("uid=0")
+        return try {
+            val future = rootExecutor.submit<Boolean> {
+                try {
+                    Shell.rootAccess()
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+            future.get(30, TimeUnit.SECONDS)
+        } catch (_: TimeoutException) {
+            VpnStateBridge.addLog("Root mode: root check timed out (did you grant root when asked?).")
+            false
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Runs one command in libsu's persistent root shell and returns
+     * (exitCode, stdout+stderr). The shell survives between calls, so a
+     * daemon started with `&` is not killed when a single command returns.
+     */
+    private fun runRootCmd(cmd: String, timeoutSec: Long): Pair<Int, String> {
+        return try {
+            val future = rootExecutor.submit<Pair<Int, String>> {
+                try {
+                    val shell = Shell.getShell()
+                    if (!shell.isRoot) return@submit -1 to "no root shell"
+                    val result = shell.newJob().add(cmd).exec()
+                    val out = (result.out + result.err).joinToString("\n")
+                    result.code to out
+                } catch (t: Throwable) {
+                    -1 to (t.message ?: "libsu exec failed")
+                }
+            }
+            future.get(timeoutSec, TimeUnit.SECONDS)
+        } catch (_: TimeoutException) {
+            -1 to "timeout after ${timeoutSec}s"
+        } catch (t: Throwable) {
+            -1 to (t.message ?: "exec failed")
+        }
     }
 
     // --------------------------------------------------------------- lifecycle
@@ -114,28 +172,39 @@ object HevRootEngine {
             return false
         }
         if (!isRootAvailable()) {
-            VpnStateBridge.addLog("Root mode: no root access (su -c id did not return uid=0).")
+            VpnStateBridge.addLog("Root mode: no root access (grant root when asked, then retry).")
             return false
         }
         VpnStateBridge.addLog("Root mode: starting hev tunnel (vpnx0, fwmark $MARK)...")
         val uid = Process.myUid()
-        val (code, out) = runCmd(
-            arrayOf(
-                "su", "-c",
-                "sh ${startScript.absolutePath} ${cli.absolutePath} ${configFile.absolutePath} " +
-                    "${pidFile.absolutePath} ${logFile.absolutePath} $uid $TUN_NAME $MARK $TABLE"
-            ),
+        val (code, out) = runRootCmd(
+            "sh ${startScript.absolutePath} ${cli.absolutePath} ${configFile.absolutePath} " +
+                "${pidFile.absolutePath} ${logFile.absolutePath} $uid $TUN_NAME $MARK $TABLE",
             30
         )
+        if (out.isNotBlank()) {
+            VpnStateBridge.addLog("Root setup output: ${out.trim().take(300)}")
+        }
         if (code != 0) {
-            VpnStateBridge.addLog("Root mode: setup script failed (exit $code). ${out.trim().take(300)}")
+            VpnStateBridge.addLog("Root mode: setup script failed (exit $code).")
             logHevTail(logFile)
             runStopScript(context)
             return false
         }
+        // hev must still be alive now that the setup command returned: if
+        // it died with the shell session, the TUN will vanish with it.
+        if (!isHevProcessAlive(context, pidFile)) {
+            VpnStateBridge.addLog("Root mode: hev died right after launch (pid file missing or process gone).")
+            logRootDiagnostics(context, socksPort)
+            runStopScript(context)
+            return false
+        }
         if (!waitForTunnelUp(context, socksPort, 6000)) {
-            VpnStateBridge.addLog("Root mode: vpnx0 did not come up or SOCKS port did not answer.")
-            logHevTail(logFile)
+            VpnStateBridge.addLog(
+                "Root mode: vpnx0 did not come up or SOCKS port did not answer " +
+                    "(tun visible=$lastTunOk, socks open=$lastSocksOk)."
+            )
+            logRootDiagnostics(context, socksPort)
             runStopScript(context)
             return false
         }
@@ -164,7 +233,9 @@ object HevRootEngine {
 
     /** TUN interface exists and the local SOCKS port accepts a connection. */
     fun isTunnelUp(context: Context, socksPort: Int): Boolean {
-        return tunExists() && socksPortOpen(socksPort)
+        lastTunOk = tunExists()
+        lastSocksOk = socksPortOpen(socksPort)
+        return lastTunOk && lastSocksOk
     }
 
     private fun waitForTunnelUp(context: Context, socksPort: Int, timeoutMs: Long): Boolean {
@@ -200,23 +271,17 @@ object HevRootEngine {
      */
     private fun verifyBypass(): Boolean {
         val uid = Process.myUid()
-        // The setup script prefers /system/bin/ip but falls back to PATH,
-        // so check both the same way.
-        for (ipBin in listOf("ip", "/system/bin/ip")) {
-            val (uidCode, _) = runCmd(
-                arrayOf("su", "-c", "$ipBin rule show | grep -q 'uidrange $uid-$uid'"),
-                10
-            )
-            if (uidCode == 0) return true
-        }
-        for (iptBin in listOf("iptables", "/system/bin/iptables")) {
-            val (iptCode, _) = runCmd(
-                arrayOf("su", "-c", "$iptBin -t mangle -C OUTPUT -m owner --uid-owner $uid -j MARK --set-mark $MARK"),
-                10
-            )
-            if (iptCode == 0) return true
-        }
-        return false
+        val (uidCode, _) = runRootCmd(
+            "ip rule show | grep -q 'uidrange $uid-$uid' || /system/bin/ip rule show | grep -q 'uidrange $uid-$uid'",
+            10
+        )
+        if (uidCode == 0) return true
+        val (iptCode, _) = runRootCmd(
+            "iptables -t mangle -C OUTPUT -m owner --uid-owner $uid -j MARK --set-mark $MARK " +
+                "|| /system/bin/iptables -t mangle -C OUTPUT -m owner --uid-owner $uid -j MARK --set-mark $MARK",
+            10
+        )
+        return iptCode == 0
     }
 
     private fun startWatchdog(context: Context, socksPort: Int, onTunnelDead: () -> Unit) {
@@ -316,12 +381,68 @@ object HevRootEngine {
         }
     }
 
-    // ------------------------------------------------------------ root shell
+    // ------------------------------------------------------- diagnostics
 
     /**
-     * Runs a command and returns (exitCode, combined stdout+stderr).
-     * Streams are drained on a reader thread so a chatty command cannot
-     * deadlock on a full pipe.
+     * Best-effort: is the hev process from the pid file still alive? The
+     * pid file is written by hev itself at startup; give it a moment to
+     * appear, then check with kill -0. Returns false when the pid file
+     * never appears or the process is gone — the exact failure v1.0.2 hit.
+     */
+    private fun isHevProcessAlive(context: Context, pidFile: File): Boolean {
+        var pid: String? = null
+        for (i in 0 until 10) {
+            try {
+                pid = pidFile.readText().trim().takeIf { it.isNotEmpty() && it.all { c -> c.isDigit() } }
+            } catch (_: Throwable) {}
+            if (pid != null) break
+            try { Thread.sleep(200) } catch (_: InterruptedException) { return false }
+        }
+        if (pid == null) {
+            VpnStateBridge.addLog("Root diag: hev pid file never appeared.")
+            return false
+        }
+        val (code, _) = runRootCmd("kill -0 $pid", 10)
+        if (code != 0) {
+            VpnStateBridge.addLog("Root diag: hev pid $pid is not alive.")
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Runs on a failed start so the log says *which* piece is broken:
+     * app-side vs root-side view of the interface, the routing rules, the
+     * hev process, and the hev log itself.
+     */
+    private fun logRootDiagnostics(context: Context, socksPort: Int) {
+        val filesDir = context.filesDir
+        val logFile = File(filesDir, LOG_NAME)
+        val pidFile = File(filesDir, PID_NAME)
+        fun diag(label: String, code: Int, out: String) {
+            val text = out.trim().replace("\n", " | ").take(400)
+            VpnStateBridge.addLog("Root diag $label (exit $code): $text")
+        }
+        // App-side view (no root): can this process even see the interface?
+        val (appCode, appOut) = runCmd(arrayOf("/system/bin/ip", "link", "show", TUN_NAME), 5)
+        diag("ip-link-app", appCode, if (appOut.isBlank()) "(no output)" else appOut)
+        // Root-side view + routing state.
+        val (rootCode, rootOut) = runRootCmd("ip link show $TUN_NAME; echo ---; ip rule show; echo ---; ip route show table $TABLE", 10)
+        diag("ip-link-root+rules", rootCode, rootOut)
+        val (psCode, psOut) = runRootCmd("ps -A | grep -i hev", 10)
+        diag("hev-process", psCode, if (psOut.isBlank()) "(no hev process)" else psOut)
+        val pidText = try { pidFile.readText().trim() } catch (_: Throwable) { "(unreadable)" }
+        VpnStateBridge.addLog("Root diag pid-file: $pidText; hev log exists=${logFile.exists()} size=${if (logFile.exists()) logFile.length() else 0}")
+        VpnStateBridge.addLog("Root diag socks port $socksPort open=${socksPortOpen(socksPort)}")
+        logHevTail(logFile)
+    }
+
+    // ------------------------------------------------------------ shell
+
+    /**
+     * Runs a command as the app (no root) and returns (exitCode, combined
+     * stdout+stderr). Streams are drained on a reader thread so a chatty
+     * command cannot deadlock on a full pipe.
      */
     private fun runCmd(cmd: Array<String>, timeoutSec: Long): Pair<Int, String> {
         return try {
@@ -353,21 +474,24 @@ object HevRootEngine {
         val stopScript = File(context.filesDir, STOP_SCRIPT_NAME)
         if (!stopScript.exists()) return
         val uid = Process.myUid()
-        runCmd(
-            arrayOf(
-                "su", "-c",
-                "sh ${stopScript.absolutePath} ${File(context.filesDir, PID_NAME).absolutePath} " +
-                    "$TUN_NAME $uid $MARK $TABLE"
-            ),
+        runRootCmd(
+            "sh ${stopScript.absolutePath} ${File(context.filesDir, PID_NAME).absolutePath} " +
+                "$TUN_NAME $uid $MARK $TABLE",
             20
         )
     }
 
     private fun logHevTail(logFile: File) {
         try {
-            if (!logFile.exists()) return
+            if (!logFile.exists()) {
+                VpnStateBridge.addLog("Root diag: hev log file missing (hev never started or could not write it).")
+                return
+            }
             val lines = logFile.readLines().takeLast(12)
-            if (lines.isEmpty()) return
+            if (lines.isEmpty()) {
+                VpnStateBridge.addLog("Root diag: hev log file empty (hev started clean, wrote nothing at warn level).")
+                return
+            }
             VpnStateBridge.addLog("hev log tail:")
             lines.forEach { line -> VpnStateBridge.addLog("  ${line.take(200)}") }
         } catch (_: Throwable) {}
@@ -376,10 +500,11 @@ object HevRootEngine {
     // ------------------------------------------------------------- scripts
 
     /**
-     * Both scripts are written as files and executed by `su -c 'sh <file> …'`.
-     * The kill pattern (the hev config filename) lives only inside the stop
-     * script's content, never in a process command line, so pkill cannot
-     * match the shell running the script itself.
+     * Both scripts are written as files and executed in libsu's persistent
+     * root shell (`sh <file> …`). The kill pattern (the hev config
+     * filename) lives only inside the stop script's content, never in a
+     * process command line, so pkill cannot match the shell running the
+     * script itself.
      *
      * Start script args:  $1 CLI  $2 config  $3 pid-file  $4 log  $5 app uid
      *                     $6 tun name  $7 fwmark  $8 table
@@ -402,11 +527,12 @@ object HevRootEngine {
             appendLine("\"\$IP\" route del default dev \"\$TUN\" table \"\$TAB\" 2>/dev/null")
             appendLine("\"\$IPT\" -t mangle -D OUTPUT -m owner --uid-owner \"\$APPUID\" -j MARK --set-mark \"\$MARK\" 2>/dev/null")
             appendLine("rm -f \"\$PIDF\"")
-            appendLine("# hev creates the TUN interface itself and writes its pid file")
+            appendLine("# hev creates the TUN interface itself and writes its pid file.")
+            appendLine("# nohup + setsid so it survives the shell that launched it.")
             appendLine("if command -v setsid >/dev/null 2>&1; then")
-            appendLine("  setsid \"\$CLI\" \"\$CFG\" >>\"\$LOGF\" 2>&1 < /dev/null &")
+            appendLine("  nohup setsid \"\$CLI\" \"\$CFG\" >>\"\$LOGF\" 2>&1 < /dev/null &")
             appendLine("else")
-            appendLine("  \"\$CLI\" \"\$CFG\" >>\"\$LOGF\" 2>&1 < /dev/null &")
+            appendLine("  nohup \"\$CLI\" \"\$CFG\" >>\"\$LOGF\" 2>&1 < /dev/null &")
             appendLine("fi")
             appendLine("i=0")
             appendLine("while [ \"\$i\" -lt 50 ]; do")
