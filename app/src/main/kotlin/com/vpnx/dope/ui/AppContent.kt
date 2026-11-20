@@ -21,7 +21,6 @@ import com.vpnx.dope.ui.screens.settings.SettingsViewModel
 import top.yukonga.miuix.kmp.basic.NavigationBar
 import top.yukonga.miuix.kmp.basic.NavigationBarItem
 import top.yukonga.miuix.kmp.basic.Scaffold
-import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.File
 import top.yukonga.miuix.kmp.icon.extended.Home
 import top.yukonga.miuix.kmp.icon.extended.Layers
@@ -49,25 +48,25 @@ fun AppContent(
                 NavigationBarItem(
                     selected = currentTab == AppTab.HOME,
                     onClick = { currentTab = AppTab.HOME },
-                    icon = MiuixIcons.extended.Home,
+                    icon = Home,
                     label = "Home"
                 )
                 NavigationBarItem(
                     selected = currentTab == AppTab.CONFIG,
                     onClick = { currentTab = AppTab.CONFIG },
-                    icon = MiuixIcons.extended.Layers,
+                    icon = Layers,
                     label = "Config"
                 )
                 NavigationBarItem(
                     selected = currentTab == AppTab.LOGS,
                     onClick = { currentTab = AppTab.LOGS },
-                    icon = MiuixIcons.extended.File,
+                    icon = File,
                     label = "Logs"
                 )
                 NavigationBarItem(
                     selected = currentTab == AppTab.SETTINGS,
                     onClick = { currentTab = AppTab.SETTINGS },
-                    icon = MiuixIcons.extended.Settings,
+                    icon = Settings,
                     label = "Settings"
                 )
             }

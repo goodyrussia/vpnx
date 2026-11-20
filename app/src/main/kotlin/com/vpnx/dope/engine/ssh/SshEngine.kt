@@ -9,8 +9,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
+import net.schmizz.sshj.connection.channel.direct.DirectConnection
 import net.schmizz.sshj.connection.channel.direct.DirectTCPIPChannel
-import net.schmizz.sshj.connection.channel.direct.Parameters
 import net.schmizz.sshj.transport.verification.HostKeyVerifier
 import java.io.InputStream
 import java.io.OutputStream
@@ -94,9 +94,11 @@ object SshEngine {
     ) {
         var channel: DirectTCPIPChannel? = null
         try {
-            val params = Parameters("127.0.0.1", 0, targetHost, targetPort)
-            channel = client.connection.openChannel("direct-tcpip") as? DirectTCPIPChannel
-                ?: DirectTCPIPChannel(client.connection, params)
+            // SSHJ 0.38: Connection has no openChannel(), and
+            // DirectTCPIPChannel's constructor is protected. The public
+            // way to open a direct-tcpip channel is DirectConnection
+            // (a DirectTCPIPChannel subclass with a public constructor).
+            channel = DirectConnection(client.connection, targetHost, targetPort)
             channel.open()
 
             val remoteIn = channel.inputStream
