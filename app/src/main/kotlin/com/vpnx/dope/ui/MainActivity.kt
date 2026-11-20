@@ -55,7 +55,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         // Matched by CI version bump script
-        const val CURRENT_BUILD_CODE = 9
-        const val CURRENT_VERSION_NAME = "1.0.8"
+        const val CURRENT_BUILD_CODE = 10
+        const val CURRENT_VERSION_NAME = "1.0.9"
     }
 }
