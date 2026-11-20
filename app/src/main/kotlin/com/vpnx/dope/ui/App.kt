@@ -15,7 +15,7 @@ import com.vpnx.dope.ui.screens.HomeScreen
 import com.vpnx.dope.ui.screens.LogsScreen
 import com.vpnx.dope.ui.screens.SettingsScreen
 import top.yukonga.miuix.kmp.basic.NavigationBar
-import top.yukonga.miuix.kmp.basic.NavigationItem
+import top.yukonga.miuix.kmp.basic.NavigationBarItem
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.TopAppBar
 
@@ -29,25 +29,25 @@ fun VpnxApp() {
             topBar = { TopAppBar(title = "VPNX") },
             bottomBar = {
                 NavigationBar {
-                    NavigationItem(
+                    NavigationBarItem(
                         icon = IconHome,
                         label = "Home",
                         selected = tab == 0,
                         onClick = { tab = 0 },
                     )
-                    NavigationItem(
+                    NavigationBarItem(
                         icon = IconConfigs,
                         label = "Configs",
                         selected = tab == 1,
                         onClick = { tab = 1 },
                     )
-                    NavigationItem(
+                    NavigationBarItem(
                         icon = IconLogs,
                         label = "Logs",
                         selected = tab == 2,
                         onClick = { tab = 2 },
                     )
-                    NavigationItem(
+                    NavigationBarItem(
                         icon = IconSettings,
                         label = "Settings",
                         selected = tab == 3,
