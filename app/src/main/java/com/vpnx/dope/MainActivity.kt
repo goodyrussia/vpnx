@@ -103,8 +103,8 @@ private val RoyalBgMid = Color(0xFF1F0B3B)
 private val RoyalBgBottom = Color(0xFF07020F)
 private val RoyalCardSurface = Color(0xFF180930)
 
-private const val CURRENT_BUILD_CODE = 1
-private const val CURRENT_VERSION_NAME = "1.0.0"
+private const val CURRENT_BUILD_CODE = 2
+private const val CURRENT_VERSION_NAME = "1.0.1"
 
 private val OTA_MANIFEST_URLS = listOf(
     "https://github.com/goodyrussia/vpnx/releases/latest/download/update.json",
