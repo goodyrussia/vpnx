@@ -1,0 +1,54 @@
+name: Build VPNX
+
+# All VPNX building happens here on GitHub Actions. Nothing is built locally.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 26
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "26"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install SDK platform and build-tools
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+
+      # The Gradle wrapper jar is generated in CI (it is a binary and is not
+      # committed through the repo's file sync). Same approach Albert used.
+      - name: Generate Gradle wrapper (9.9.2)
+        run: gradle wrapper --gradle-version 9.9.2
+
+      - name: Make wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Build debug APK
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VPNX-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
