@@ -1,39 +1,16 @@
 # vpnx
 
-Android VPN client (Xray-core + SSH). Fresh app, package `com.vpnx.dope`.
+Brand-new modern Android VPN application built with **Miuix** (Xiaomi HyperOS Compose styling) and dual-mode capture engines: **VpnService** (non-root) and **hev TUN2SOCKS** (KernelSU-Next root).
 
-Built from the Albert codebase (`com.albert.smartvpn`), renamed so it installs
-alongside Albert. Engines kept as-is: SSH (direct / HTTP proxy / TLS-SNI /
-TLS+proxy, with payload support), Xray (VLESS / VMess / Trojan / Shadowsocks),
-Hysteria2, WireGuard, OpenVPN, SlowDNS / Slipstream.
-
-## Build
-
-Every build runs on GitHub Actions (`.github/workflows/build.yml`): it bumps
-the version, restores the signing keystore from the `VPNX_KEYSTORE_*` repo
-secrets, builds the signed arm64-v8a release APK, and publishes it as a
-GitHub Release with `update.json` for the in-app updater.
-
-No keystore or password is committed to this repo.
-
-## Tunnel modes
-
-Settings → Tunnel Mode, applies on the next connect:
-
-- **VPN Service** — standard Android VPN (default, like Albert).
-- **Root (hev)** — runs the hev-socks5-tunnel CLI executable as root, which
-  creates the `vpnx0` TUN interface and forwards packets to the local SOCKS5
-  server the proxy engines already run. No VpnService, no VPN permission
-  prompt. Needs a rooted device (KernelSU / Magisk); grant root when asked
-  on first connect. Root commands go through libsu's persistent shell and
-  hev is launched with nohup + setsid so it survives the shell that started
-  it. The proxy's own outbound traffic is kept out of the tunnel by policy
-  routing (uidrange, iptables owner-mark fallback), and a watchdog stops the
-  tunnel cleanly if hev dies. All routing is removed on disconnect. A failed
-  start prints diagnostics to the log (app-side vs root-side view of vpnx0,
-  routing rules, hev process, hev log).
-
-## Status
-
-v1.0.1 — first public build (VpnService baseline). v1.0.2 adds the Root (hev)
-mode above. Miuix rebuild is planned later, after hev root works.
+## Key Features
+- **Pure HyperOS Design:** 4-tab bottom navigation (Home, Config, Logs, Settings) powered by Miuix 0.9.4.
+- **Dual Capture Engines:**
+  - **VPN Service Mode:** Seamless Android OS VpnService capture using in-process JNI `libhev-socks5-tunnel.so`.
+  - **Root (hev) Mode:** Kernel TUN (`vpnx0`) routing with policy routing rules (`pref 5`, `10`, `20`) via standalone `libhev-socks5-tunnel-cli.so` and `libsu:6.0.0`.
+- **Supported Protocols:**
+  - **SSH:** Direct TCP, HTTP Proxy, TLS (SNI), and HTTP Proxy + TLS with custom HTTP payload injection engine.
+  - **Xray:** VLESS, VMess, Trojan, Shadowsocks, and Hysteria2 via `AndroidLibXrayLite` (`v26.11.9-p1`).
+  - Strict routing-free design: Xray runs solely as local SOCKS5 inbound + proxy outbound; hev handles all TUN routing.
+- **Hotspot & Tethering Sharing:**
+  - Root mode: kernel iptables PREROUTING marks + hardware TC offload bypass.
+  - VPN mode: local SOCKS5/HTTP proxy hotshare.

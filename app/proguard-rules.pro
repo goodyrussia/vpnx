@@ -1,2 +1,6 @@
-# vpnx fork — R8 is disabled (minifyEnabled false); file kept so the
-# release buildType reference always resolves.
+-keep class libv2ray.** { *; }
+-keep class engine.vpn.hevtun.** { *; }
+-keep class com.vpnx.dope.engine.hev.** { *; }
+-keep class com.topjohnwu.superuser.** { *; }
+-keep class net.schmizz.sshj.** { *; }
+-keep class org.bouncycastle.** { *; }

@@ -1,3 +1,16 @@
 <resources>
     <string name="app_name">vpnx</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_config">Config</string>
+    <string name="nav_logs">Logs</string>
+    <string name="nav_settings">Settings</string>
+
+    <string name="status_disconnected">DISCONNECTED</string>
+    <string name="status_connecting">CONNECTING...</string>
+    <string name="status_connected">CONNECTED</string>
+    <string name="status_disconnecting">DISCONNECTING...</string>
+
+    <string name="quick_settings_tile_label">vpnx</string>
+    <string name="notification_channel_name">vpnx Tunnel Service</string>
+    <string name="notification_channel_desc">Active VPN and Root tunnel status</string>
 </resources>
