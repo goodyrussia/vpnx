@@ -16,6 +16,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vpnx.dope.data.AppDatabase
 import com.vpnx.dope.data.VpnProfile
+import com.vpnx.dope.engine.HevRootEngine
 import com.vpnx.dope.engine.SlowDnsSpeedBooster
 import com.vpnx.dope.utils.VpnConfigParser
 import com.google.gson.Gson
@@ -122,6 +123,10 @@ object VpnStateBridge {
 
     val loadBalancingEnabled = MutableStateFlow(false)
     val roundRobinEnabled: MutableStateFlow<Boolean> = loadBalancingEnabled
+    /** Capture mode: "VPN" (VpnService) or "ROOT" (hev as root, no VpnService). */
+    val tunnelMode = MutableStateFlow("VPN")
+    /** Root probe result: null = not checked yet. */
+    val rootAvailable = MutableStateFlow<Boolean?>(null)
     val turboSpeedEnabled = MutableStateFlow(true)
     val slowDnsBoostEnabled = MutableStateFlow(true)
     val pingResultText = MutableStateFlow("Connect VPN to test live tunnel latency")
@@ -195,6 +200,7 @@ object VpnStateBridge {
         prefsInitialized = true
         try {
             val p = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            tunnelMode.value = p.getString("tunnel_mode", "VPN") ?: "VPN"
             loadBalancingEnabled.value = p.getBoolean("round_robin_enabled", false)
             turboSpeedEnabled.value = p.getBoolean("turbo_speed_enabled", true)
             slowDnsBoostEnabled.value = p.getBoolean("slow_dns_boost_enabled", true)
@@ -250,6 +256,7 @@ object VpnStateBridge {
         try {
             val p = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             p.edit()
+                .putString("tunnel_mode", tunnelMode.value)
                 .putBoolean("round_robin_enabled", loadBalancingEnabled.value)
                 .putBoolean("turbo_speed_enabled", turboSpeedEnabled.value)
                 .putBoolean("slow_dns_boost_enabled", slowDnsBoostEnabled.value)
@@ -300,6 +307,21 @@ object VpnStateBridge {
                 .putInt("share_net_port", shareNetPort.value)
                 .apply()
         } catch (_: Throwable) {}
+    }
+
+    /** Persists a tunnel-mode change (applies on the next connect). */
+    fun setTunnelMode(context: Context, mode: String) {
+        tunnelMode.value = if (mode == "ROOT") "ROOT" else "VPN"
+        persistAllSettings(context)
+    }
+
+    /** Probes `su -c id` off the main thread and publishes the result. */
+    fun checkRootAvailability(context: Context) {
+        Thread({
+            val ok = try { HevRootEngine.isRootAvailable() } catch (_: Throwable) { false }
+            rootAvailable.value = ok
+            if (ok) addLog("Root detected: hev root mode is available.")
+        }, "vpnx-root-check").apply { isDaemon = true }.start()
     }
 
     fun saveRoundRobinPref(context: Context, enabled: Boolean) {

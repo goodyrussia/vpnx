@@ -27,13 +27,25 @@ class QuickSettingsTileService : TileService() {
             startService(stopIntent)
             updateTileState(false)
         } else {
-            val prepareIntent = VpnService.prepare(this)
-            if (prepareIntent == null) {
+            val prefs = getSharedPreferences("vpnx_v12_settings_prefs", MODE_PRIVATE)
+            val rootMode = prefs.getString("tunnel_mode", "VPN") == "ROOT"
+            if (rootMode) {
+                // Root mode needs no VpnService permission.
                 val startIntent = Intent(this, SmartVpnService::class.java).apply {
                     action = SmartVpnService.ACTION_START
+                    putExtra(SmartVpnService.EXTRA_ROOT_MODE, true)
                 }
                 startService(startIntent)
                 updateTileState(true)
+            } else {
+                val prepareIntent = VpnService.prepare(this)
+                if (prepareIntent == null) {
+                    val startIntent = Intent(this, SmartVpnService::class.java).apply {
+                        action = SmartVpnService.ACTION_START
+                    }
+                    startService(startIntent)
+                    updateTileState(true)
+                }
             }
         }
     }

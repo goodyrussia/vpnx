@@ -16,6 +16,7 @@ import com.vpnx.dope.MainActivity
 import com.vpnx.dope.R
 import com.vpnx.dope.data.AppDatabase
 import com.vpnx.dope.data.VpnProfile
+import com.vpnx.dope.engine.HevRootEngine
 import com.vpnx.dope.engine.HotshareServer
 import com.vpnx.dope.engine.Hysteria2Engine
 import com.vpnx.dope.engine.SlipstreamDnsEngine
@@ -49,6 +50,8 @@ class SmartVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.vpnx.dope.START"
         const val ACTION_STOP = "com.vpnx.dope.STOP"
+        /** Start the pipeline in root (hev) mode instead of VpnService mode. */
+        const val EXTRA_ROOT_MODE = "com.vpnx.dope.ROOT_MODE"
         private const val CHANNEL_ID = "vpnx_live_channel"
         private const val NOTIFICATION_ID = 101
         private const val TAG = "SmartVpnService"
@@ -70,6 +73,9 @@ class SmartVpnService : VpnService() {
     @Volatile private var activeEngineType = "NONE"
     @Volatile private var tunStarted = false
     @Volatile private var hotshareStarted = false
+    /** True for this start when the caller asked for root (hev) mode. */
+    @Volatile private var rootMode = false
+    @Volatile private var hevRootStarted = false
 
     override fun onCreate() {
         super.onCreate()
@@ -84,9 +90,18 @@ class SmartVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        SshEngine.activeVpnService = this
-        SlipstreamDnsEngine.activeVpnService = this
-        XrayCore.activeVpnService = this
+        rootMode = intent?.getBooleanExtra(EXTRA_ROOT_MODE, false) ?: false
+        if (rootMode) {
+            // Root mode must not use protect(): the bypass is done by policy
+            // routing (uidrange / iptables owner-mark) in HevRootEngine.
+            SshEngine.activeVpnService = null
+            SlipstreamDnsEngine.activeVpnService = null
+            XrayCore.activeVpnService = null
+        } else {
+            SshEngine.activeVpnService = this
+            SlipstreamDnsEngine.activeVpnService = this
+            XrayCore.activeVpnService = this
+        }
         when (intent?.action) {
             ACTION_START -> startVpnPipeline()
             ACTION_STOP -> stopVpnPipeline(resetStatus = true, cancelActiveJob = true)
@@ -180,9 +195,11 @@ class SmartVpnService : VpnService() {
 
     private fun startVpnPipeline() {
         VpnStateBridge.initPrefs(applicationContext)
-        SshEngine.activeVpnService = this
-        SlipstreamDnsEngine.activeVpnService = this
-        XrayCore.activeVpnService = this
+        if (!rootMode) {
+            SshEngine.activeVpnService = this
+            SlipstreamDnsEngine.activeVpnService = this
+            XrayCore.activeVpnService = this
+        }
         VpnStateBridge.hasShownSplash = true
         VpnStateBridge.updateState("CONNECTING", "CONNECTING...")
         promoteForeground("vpnx V1.2", "Connecting...")
@@ -453,6 +470,22 @@ class SmartVpnService : VpnService() {
                 val primaryDns = primaryProfile.customDns.trim().ifBlank { VpnStateBridge.customDns1.value }.ifBlank { "1.1.1.1" }
                 val secondaryDns = VpnStateBridge.customDns2.value.ifBlank { "8.8.8.8" }
 
+                if (rootMode) {
+                    // Root (hev) capture: no VpnService, no Builder.establish().
+                    // HevRootEngine starts the hev CLI as root, which creates
+                    // vpnx0 and forwards to the local SOCKS server above.
+                    VpnStateBridge.addLog("Root mode: starting hev capture (no VpnService)...")
+                    hevRootStarted = HevRootEngine.start(applicationContext, localSocksPort) {
+                        serviceScope.launch { stopVpnPipeline(resetStatus = true) }
+                    }
+                    if (!hevRootStarted) {
+                        VpnStateBridge.slowDnsBoostEnabled.value = false
+                        VpnStateBridge.addLog("Root mode failed to start.")
+                        VpnStateBridge.updateState("DISCONNECTED", "NOT CONNECTED")
+                        stopVpnPipeline(resetStatus = false, cancelActiveJob = false)
+                        return@launch
+                    }
+                } else {
                 val builder = Builder()
                     .setSession("vpnx V1.2")
                     .setMtu(if (proto == "WIREGUARD") primaryProfile.wgMtu.coerceIn(1280, 1500) else 1400)
@@ -492,6 +525,7 @@ class SmartVpnService : VpnService() {
                     stopVpnPipeline(resetStatus = false, cancelActiveJob = false)
                     return@launch
                 }
+                } // end VpnService capture branch
 
                 VpnStateBridge.updateState("CONNECTED", "CONNECTED")
                 if (isSlipstreamProto) {
@@ -499,11 +533,19 @@ class SmartVpnService : VpnService() {
                 } else if (isSlowDnsProto) {
                     VpnStateBridge.addLog("SlowDNS High-Speed Turbo Mode Active (Multiplexed + Zlib).")
                 }
-                VpnStateBridge.addLog("VPN Connected (${activeNodes.size} active node(s) • Wi-Fi & Mobile Data).")
+                if (rootMode) {
+                    VpnStateBridge.addLog("Root (hev) Connected (${activeNodes.size} active node(s) • Wi-Fi & Mobile Data).")
+                } else {
+                    VpnStateBridge.addLog("VPN Connected (${activeNodes.size} active node(s) • Wi-Fi & Mobile Data).")
+                }
                 if (primaryProfile.customServerMessage.isNotBlank()) {
                     VpnStateBridge.addLog("Server Message: ${primaryProfile.customServerMessage}")
                 }
-                promoteForeground("vpnx V1.2 • ACTIVE", "VPN Tunnel Protected (${primaryProfile.name})")
+                if (rootMode) {
+                    promoteForeground("vpnx V1.2 • ACTIVE (Root)", "Root Tunnel Protected (${primaryProfile.name})")
+                } else {
+                    promoteForeground("vpnx V1.2 • ACTIVE", "VPN Tunnel Protected (${primaryProfile.name})")
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "VPN Pipeline error: ${t.message}", t)
                 VpnStateBridge.slowDnsBoostEnabled.value = false
@@ -696,6 +738,13 @@ class SmartVpnService : VpnService() {
 
         serviceScope.launch {
             try {
+                // Root capture first: removing the routing before the engines
+                // stop means no traffic can leak direct while tearing down.
+                if (hevRootStarted || HevRootEngine.isRunning) {
+                    hevRootStarted = false
+                    try { HevRootEngine.stop(applicationContext) } catch (_: Throwable) {}
+                }
+
                 try { vpnInterface?.close() } catch (_: Throwable) {}
                 vpnInterface = null
 
@@ -746,6 +795,14 @@ class SmartVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        // Safety net if the pipeline stop never ran (e.g. service killed):
+        // never leave root routing behind. Best effort on a thread, since
+        // onDestroy must not block on a root shell call.
+        if (HevRootEngine.isRunning) {
+            Thread {
+                try { HevRootEngine.stop(applicationContext) } catch (_: Throwable) {}
+            }.apply { isDaemon = true }.start()
+        }
         if (SshEngine.activeVpnService === this) {
             SshEngine.activeVpnService = null
         }

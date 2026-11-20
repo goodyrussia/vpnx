@@ -189,9 +189,18 @@ tasks.register("provisionNativeEngines") {
                         "\$NDK_BIN" -C "\$TMP_DIR/hev-proj" -j4 APP_ABI="arm64-v8a armeabi-v7a" APP_PLATFORM=android-24 || true
                         cp -f "\$TMP_DIR/hev-proj/libs/arm64-v8a/libhev-socks5-tunnel.so" "\$JNI64/libhev-socks5-tunnel.so" 2>/dev/null || true
                         cp -f "\$TMP_DIR/hev-proj/libs/armeabi-v7a/libhev-socks5-tunnel.so" "\$JNI32/libhev-socks5-tunnel.so" 2>/dev/null || true
+                        # Root mode needs the standalone hev executable too: the same
+                        # ndk-build also produces hev-socks5-tunnel-bin (BUILD_EXECUTABLE
+                        # in hev's Android.mk). Ship it as a .so-named file so it lands
+                        # in the APK's lib/ dir and is extracted with exec permission.
+                        cp -f "\$TMP_DIR/hev-proj/libs/arm64-v8a/hev-socks5-tunnel-bin" "\$JNI64/libhev-socks5-tunnel-cli.so" 2>/dev/null || true
+                        cp -f "\$TMP_DIR/hev-proj/libs/armeabi-v7a/hev-socks5-tunnel-bin" "\$JNI32/libhev-socks5-tunnel-cli.so" 2>/dev/null || true
                     fi
                 fi
-                chmod 755 "\$JNI64/libhev-socks5-tunnel.so" "\$JNI32/libhev-socks5-tunnel.so" 2>/dev/null || true
+                chmod 755 "\$JNI64/libhev-socks5-tunnel.so" "\$JNI32/libhev-socks5-tunnel.so" "\$JNI64/libhev-socks5-tunnel-cli.so" "\$JNI32/libhev-socks5-tunnel-cli.so" 2>/dev/null || true
+                if [ ! -s "\$JNI64/libhev-socks5-tunnel-cli.so" ]; then
+                    echo "WARNING: hev CLI executable was not built; root (hev) mode will be unavailable in this APK."
+                fi
             fi
 
             rm -rf "\$TMP_DIR"

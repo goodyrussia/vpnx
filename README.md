@@ -16,8 +16,20 @@ GitHub Release with `update.json` for the in-app updater.
 
 No keystore or password is committed to this repo.
 
+## Tunnel modes
+
+Settings → Tunnel Mode, applies on the next connect:
+
+- **VPN Service** — standard Android VPN (default, like Albert).
+- **Root (hev)** — runs the hev-socks5-tunnel CLI executable as root, which
+  creates the `vpnx0` TUN interface and forwards packets to the local SOCKS5
+  server the proxy engines already run. No VpnService, no VPN permission
+  prompt. Needs a rooted device (KernelSU / Magisk); the proxy's own
+  outbound traffic is kept out of the tunnel by policy routing (uidrange,
+  iptables owner-mark fallback), and a watchdog stops the tunnel cleanly if
+  hev dies. All routing is removed on disconnect.
+
 ## Status
 
-v1.0.0 — first public build. Hev root mode (TUN via hev-socks5-tunnel as a
-root option instead of VpnService) is planned next; the current build uses
-VpnService like Albert.
+v1.0.1 — first public build (VpnService baseline). v1.0.2 adds the Root (hev)
+mode above. Miuix rebuild is planned later, after hev root works.

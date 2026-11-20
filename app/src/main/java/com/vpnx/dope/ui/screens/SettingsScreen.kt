@@ -124,6 +124,7 @@ fun SettingsScreen(viewModel: VpnViewModel? = null) {
 
     LaunchedEffect(Unit) {
         VpnStateBridge.initPrefs(context)
+        VpnStateBridge.checkRootAvailability(context)
     }
 
     val appLogLevel by VpnStateBridge.appLogLevel.collectAsState()
@@ -131,6 +132,8 @@ fun SettingsScreen(viewModel: VpnViewModel? = null) {
     val autoReconnect by VpnStateBridge.autoReconnect.collectAsState()
     val autoReconnectMaxRetries by VpnStateBridge.autoReconnectMaxRetries.collectAsState()
     val startOnBoot by VpnStateBridge.startOnBoot.collectAsState()
+    val tunnelMode by VpnStateBridge.tunnelMode.collectAsState()
+    val rootAvailable by VpnStateBridge.rootAvailable.collectAsState()
     val hapticFeedback by VpnStateBridge.hapticFeedback.collectAsState()
     val soundEffects by VpnStateBridge.soundEffects.collectAsState()
     val floatingSpeedBubble by VpnStateBridge.floatingSpeedBubble.collectAsState()
@@ -214,6 +217,115 @@ fun SettingsScreen(viewModel: VpnViewModel? = null) {
             fontWeight = FontWeight.ExtraBold,
             modifier = Modifier.padding(bottom = 14.dp)
         )
+
+        // =========================================================================
+        // TUNNEL MODE SECTION
+        // =========================================================================
+        SectionHeaderLabel("TUNNEL MODE")
+
+        Surface(
+            color = Color(0xFF1F1038),
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, AccentGoldBorder),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            VpnStateBridge.setTunnelMode(context, "VPN")
+                            notifyToast("Tunnel mode: VPN Service (applies on next connect)")
+                        },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = tunnelMode == "VPN",
+                        onClick = {
+                            VpnStateBridge.setTunnelMode(context, "VPN")
+                            notifyToast("Tunnel mode: VPN Service (applies on next connect)")
+                        },
+                        colors = RadioButtonDefaults.colors(selectedColor = AccentGold)
+                    )
+                    Column(modifier = Modifier.weight(1f).padding(start = 8.dp)) {
+                        Text(
+                            text = "VPN Service",
+                            color = TextWhite,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Standard Android VPN, asks for VPN permission.",
+                            color = TextWhite.copy(alpha = 0.7f),
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            VpnStateBridge.setTunnelMode(context, "ROOT")
+                            VpnStateBridge.checkRootAvailability(context)
+                            notifyToast("Tunnel mode: Root (hev) (applies on next connect)")
+                        },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = tunnelMode == "ROOT",
+                        onClick = {
+                            VpnStateBridge.setTunnelMode(context, "ROOT")
+                            VpnStateBridge.checkRootAvailability(context)
+                            notifyToast("Tunnel mode: Root (hev) (applies on next connect)")
+                        },
+                        colors = RadioButtonDefaults.colors(selectedColor = AccentGold)
+                    )
+                    Column(modifier = Modifier.weight(1f).padding(start = 8.dp)) {
+                        Text(
+                            text = "Root (hev)",
+                            color = TextWhite,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "hev tunnel as root, no VPN permission prompt. Needs a rooted device.",
+                            color = TextWhite.copy(alpha = 0.7f),
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = when (rootAvailable) {
+                            true -> "Root status: available"
+                            false -> "Root status: not detected"
+                            null -> "Root status: checking..."
+                        },
+                        color = if (rootAvailable == true) AccentGold else TextWhite.copy(alpha = 0.7f),
+                        fontSize = 12.sp
+                    )
+                    OutlinedButton(onClick = { VpnStateBridge.checkRootAvailability(context) }) {
+                        Text(text = "Check root", fontSize = 12.sp)
+                    }
+                }
+                Text(
+                    text = "Mode applies on the next connect. If a tunnel is running, disconnect first.",
+                    color = TextWhite.copy(alpha = 0.6f),
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+        }
 
         // =========================================================================
         // 1. GENERAL SECTION

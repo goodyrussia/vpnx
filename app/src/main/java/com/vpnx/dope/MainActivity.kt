@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import com.vpnx.dope.data.VpnProfile
+import com.vpnx.dope.engine.HevRootEngine
 import com.vpnx.dope.engine.SlowDnsSpeedBooster
 import com.vpnx.dope.ui.screens.ConfigsScreen
 import com.vpnx.dope.ui.screens.HomeScreen
@@ -2313,16 +2314,37 @@ class MainActivity : ComponentActivity() {
             VpnStateBridge.updateState("DISCONNECTED", "NOT CONNECTED")
         } else {
             requestNotificationPermissionIfNeeded()
-            val intent = VpnService.prepare(this)
-            if (intent != null) vpnRequest.launch(intent) else startVpnService()
+            if (VpnStateBridge.tunnelMode.value == "ROOT") {
+                // Root mode needs no VpnService permission. Verify root first
+                // so a non-rooted device fails fast with a clear message.
+                VpnStateBridge.updateState("CONNECTING", "CONNECTING...")
+                Thread({
+                    val ok = try { HevRootEngine.isRootAvailable() } catch (_: Throwable) { false }
+                    runOnUiThread {
+                        if (ok) {
+                            startVpnService(rootMode = true)
+                        } else {
+                            VpnStateBridge.updateState("DISCONNECTED", "NOT CONNECTED")
+                            VpnStateBridge.addLog("Root mode: no root access on this device.")
+                            viewModel.showToastPill("Root not available — switch to VPN mode in Settings")
+                        }
+                    }
+                }, "vpnx-root-check").apply { isDaemon = true }.start()
+            } else {
+                val intent = VpnService.prepare(this)
+                if (intent != null) vpnRequest.launch(intent) else startVpnService()
+            }
         }
     }
 
-    private fun startVpnService() {
+    private fun startVpnService(rootMode: Boolean = false) {
         VpnStateBridge.updateState("CONNECTING", "CONNECTING...")
         ContextCompat.startForegroundService(
             this,
-            Intent(this, SmartVpnService::class.java).apply { action = SmartVpnService.ACTION_START }
+            Intent(this, SmartVpnService::class.java).apply {
+                action = SmartVpnService.ACTION_START
+                if (rootMode) putExtra(SmartVpnService.EXTRA_ROOT_MODE, true)
+            }
         )
     }
 
