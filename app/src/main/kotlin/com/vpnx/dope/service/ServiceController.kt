@@ -20,10 +20,23 @@ object ServiceController {
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
+    val vpnPermissionRequester = VpnPermissionRequester()
+    @Volatile
+    private var pendingProfileId: String? = null
+
     private val controllerScope = CoroutineScope(Dispatchers.Main)
 
     fun updateState(newState: ConnectionState) {
         _connectionState.value = newState
+    }
+
+    fun onVpnPermissionResult(granted: Boolean, context: Context) {
+        vpnPermissionRequester.complete(granted)
+        if (!granted) {
+            XrayLogTailer.warn("OS VPN permission denied or cancelled by user.")
+            updateState(ConnectionState.DISCONNECTED)
+            pendingProfileId = null
+        }
     }
 
     fun startTunnel(context: Context, profileId: String? = null) {
@@ -49,24 +62,36 @@ object ServiceController {
             }
         } else {
             // VPN Service Mode (Zero root operations)
-            val prepareIntent = VpnService.prepare(context)
-            if (prepareIntent != null) {
-                // User must approve OS VPN dialog first
-                XrayLogTailer.warn("OS VPN permission required. Launching system prompt...")
-                prepareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(prepareIntent)
-                return
-            }
+            controllerScope.launch {
+                val prepareIntent = VpnService.prepare(context)
+                if (prepareIntent != null) {
+                    pendingProfileId = profileId
+                    updateState(ConnectionState.CONNECTING)
+                    XrayLogTailer.warn("OS VPN permission required. Launching system prompt...")
+                    val granted = vpnPermissionRequester.request(prepareIntent)
+                    if (!granted) {
+                        XrayLogTailer.warn("OS VPN permission denied or cancelled by user.")
+                        updateState(ConnectionState.DISCONNECTED)
+                        pendingProfileId = null
+                        return@launch
+                    }
+                    XrayLogTailer.info("OS VPN permission granted. Resuming connection...")
+                }
 
-            val intent = Intent(context, VpnModeService::class.java).apply {
-                action = VpnModeService.ACTION_START
-                putExtra(VpnModeService.EXTRA_PROFILE_ID, profileId)
+                val activeProfileId = profileId ?: pendingProfileId
+                pendingProfileId = null
+
+                val intent = Intent(context, VpnModeService::class.java).apply {
+                    action = VpnModeService.ACTION_START
+                    putExtra(VpnModeService.EXTRA_PROFILE_ID, activeProfileId)
+                }
+                ContextCompat.startForegroundService(context, intent)
             }
-            ContextCompat.startForegroundService(context, intent)
         }
     }
 
     fun stopTunnel(context: Context) {
+        pendingProfileId = null
         val settings = SettingsRepository.getInstance(context).settings.value
         if (settings.tunnelMode == "ROOT") {
             val intent = Intent(context, RootModeService::class.java).apply {

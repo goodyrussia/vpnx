@@ -75,11 +75,15 @@ object XrayEngine {
     }
 
     suspend fun stop() = withContext(Dispatchers.IO) {
-        if (isRunning.compareAndSet(true, false)) {
-            synchronized(lock) {
-                runCatching { controller?.stopLoop() }
-                controller = null
+        val wasRunning = isRunning.getAndSet(false)
+        synchronized(lock) {
+            val ctrl = controller
+            controller = null
+            if (ctrl != null) {
+                runCatching { ctrl.stopLoop() }
             }
+        }
+        if (wasRunning) {
             XrayLogTailer.info("Xray engine stopped")
         }
     }

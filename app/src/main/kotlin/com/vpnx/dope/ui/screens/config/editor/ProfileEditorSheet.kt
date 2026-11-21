@@ -49,7 +49,7 @@ fun ProfileEditorSheet(
     }
 
     val typeOptions = listOf("Xray", "SSH")
-    val selectedTypeIdx = if (state.protocolType == "SSH") 1 else 0
+    val selectedTypeIdx = (if (state.protocolType == "SSH") 1 else 0).coerceIn(typeOptions.indices)
 
     Scaffold(
         topBar = {
@@ -94,8 +94,10 @@ fun ProfileEditorSheet(
                         items = typeOptions,
                         selectedIndex = selectedTypeIdx,
                         title = "Core Type",
+                        renderInRootScaffold = false,
                         onSelectedIndexChange = { idx ->
-                            state = state.copy(protocolType = if (idx == 1) "SSH" else "XRAY")
+                            val safeIdx = idx.coerceIn(typeOptions.indices)
+                            state = state.copy(protocolType = if (safeIdx == 1) "SSH" else "XRAY")
                         }
                     )
                     Spacer(modifier = Modifier.height(12.dp))

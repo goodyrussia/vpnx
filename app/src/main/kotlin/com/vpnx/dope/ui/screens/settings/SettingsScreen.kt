@@ -15,7 +15,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.vpnx.dope.ui.theme.BrandBlue
 import com.vpnx.dope.ui.theme.StatusAmber
 import com.vpnx.dope.ui.theme.StatusGreen
 import com.vpnx.dope.ui.theme.StatusRed
@@ -72,9 +71,10 @@ fun SettingsScreen(
                 Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
                     OverlayDropdownPreference(
                         items = modeOptions,
-                        selectedIndex = selectedModeIdx,
+                        selectedIndex = selectedModeIdx.coerceIn(modeOptions.indices),
                         title = "Tunnel Mode",
                         summary = if (settings.tunnelMode == "ROOT") "High-speed kernel TUN routing" else "Standard non-root Android VpnService",
+                        renderInRootScaffold = false,
                         onSelectedIndexChange = { idx ->
                             viewModel.updateTunnelMode(if (idx == 1) "ROOT" else "VPN")
                         }
@@ -82,7 +82,7 @@ fun SettingsScreen(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    val (rootText, rootColor) = when (rootAvailable) {
+                    val (rootText, _) = when (rootAvailable) {
                         true -> Pair("Granted via KernelSU / SU", StatusGreen)
                         false -> Pair("Denied or not available", StatusRed)
                         null -> Pair("Checking root access...", StatusAmber)
@@ -186,8 +186,9 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.height(10.dp))
                     OverlayDropdownPreference(
                         items = themeOptions,
-                        selectedIndex = selectedThemeIdx,
+                        selectedIndex = selectedThemeIdx.coerceIn(themeOptions.indices),
                         title = "App Theme",
+                        renderInRootScaffold = false,
                         onSelectedIndexChange = { idx ->
                             viewModel.updateTheme(when (idx) {
                                 1 -> "LIGHT"

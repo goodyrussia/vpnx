@@ -18,7 +18,7 @@ fun SshEditorSection(
     onStateChange: (ProfileEntity) -> Unit
 ) {
     val modes = listOf("DIRECT", "PROXY", "TLS", "PROXY_TLS")
-    val selectedModeIdx = modes.indexOf(state.sshMode).coerceAtLeast(0)
+    val selectedModeIdx = modes.indexOf(state.sshMode).let { if (it >= 0) it else 0 }.coerceIn(modes.indices)
 
     Column(modifier = Modifier.fillMaxWidth()) {
         TextField(
@@ -41,8 +41,10 @@ fun SshEditorSection(
             items = listOf("Direct TCP", "HTTP Proxy", "TLS (SNI)", "HTTP Proxy + TLS"),
             selectedIndex = selectedModeIdx,
             title = "SSH Mode",
+            renderInRootScaffold = false,
             onSelectedIndexChange = { idx ->
-                onStateChange(state.copy(sshMode = modes[idx]))
+                val safeIdx = idx.coerceIn(modes.indices)
+                onStateChange(state.copy(sshMode = modes[safeIdx]))
             }
         )
         Spacer(modifier = Modifier.height(12.dp))

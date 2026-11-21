@@ -68,6 +68,7 @@ class RootModeService : Service() {
     }
 
     private suspend fun startRoot(profileId: String?) {
+        TrafficStatsTracker.reset()
         ServiceController.updateState(ConnectionState.CONNECTING)
         XrayLogTailer.info("Starting Root (hev) mode...")
 

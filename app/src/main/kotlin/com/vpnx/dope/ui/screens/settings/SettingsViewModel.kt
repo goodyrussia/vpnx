@@ -1,5 +1,6 @@
 package com.vpnx.dope.ui.screens.settings
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vpnx.dope.data.entity.AppSettings
@@ -26,36 +27,55 @@ class SettingsViewModel(
 
     fun checkRoot() {
         viewModelScope.launch(Dispatchers.IO) {
-            val result = RootShellManager.checkRootAccess()
-            _rootAvailable.value = result
+            try {
+                val result = RootShellManager.checkRootAccess()
+                _rootAvailable.value = result
+            } catch (t: Throwable) {
+                Log.e("SettingsViewModel", "Failed to check root access", t)
+                _rootAvailable.value = false
+            }
         }
     }
 
     fun updateTunnelMode(mode: String) {
-        repository.setTunnelMode(mode)
+        viewModelScope.launch {
+            repository.setTunnelMode(mode)
+        }
     }
 
     fun updateMtu(mtu: Int) {
-        repository.updateSettings(settings.value.copy(tunnelMtu = mtu))
+        viewModelScope.launch {
+            repository.updateSettings(settings.value.copy(tunnelMtu = mtu))
+        }
     }
 
     fun updateDns(primary: String, secondary: String) {
-        repository.updateSettings(settings.value.copy(primaryDns = primary, secondaryDns = secondary))
+        viewModelScope.launch {
+            repository.updateSettings(settings.value.copy(primaryDns = primary, secondaryDns = secondary))
+        }
     }
 
     fun updateHotspotSharing(enabled: Boolean) {
-        repository.updateSettings(settings.value.copy(hotspotSharing = enabled))
+        viewModelScope.launch {
+            repository.updateSettings(settings.value.copy(hotspotSharing = enabled))
+        }
     }
 
     fun updateTcpNoDelay(enabled: Boolean) {
-        repository.updateSettings(settings.value.copy(tcpNoDelay = enabled))
+        viewModelScope.launch {
+            repository.updateSettings(settings.value.copy(tcpNoDelay = enabled))
+        }
     }
 
     fun updateWakeLock(enabled: Boolean) {
-        repository.updateSettings(settings.value.copy(wakeLock = enabled))
+        viewModelScope.launch {
+            repository.updateSettings(settings.value.copy(wakeLock = enabled))
+        }
     }
 
     fun updateTheme(theme: String) {
-        repository.updateSettings(settings.value.copy(theme = theme))
+        viewModelScope.launch {
+            repository.updateSettings(settings.value.copy(theme = theme))
+        }
     }
 }

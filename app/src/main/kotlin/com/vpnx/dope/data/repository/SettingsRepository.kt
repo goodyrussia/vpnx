@@ -13,6 +13,9 @@ class SettingsRepository(context: Context) {
     private val _settings = MutableStateFlow(loadSettings())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
 
+    private val _themePreference = MutableStateFlow(_settings.value.theme)
+    val themePreference: StateFlow<String> = _themePreference.asStateFlow()
+
     private fun loadSettings(): AppSettings {
         return AppSettings(
             tunnelMode = prefs.getString(KEY_TUNNEL_MODE, "VPN") ?: "VPN",
@@ -27,6 +30,7 @@ class SettingsRepository(context: Context) {
         )
     }
 
+    @Synchronized
     fun updateSettings(newSettings: AppSettings) {
         prefs.edit()
             .putString(KEY_TUNNEL_MODE, newSettings.tunnelMode)
@@ -40,6 +44,9 @@ class SettingsRepository(context: Context) {
             .putString(KEY_THEME, newSettings.theme)
             .apply()
         _settings.value = newSettings
+        if (_themePreference.value != newSettings.theme) {
+            _themePreference.value = newSettings.theme
+        }
     }
 
     fun setTunnelMode(mode: String) {

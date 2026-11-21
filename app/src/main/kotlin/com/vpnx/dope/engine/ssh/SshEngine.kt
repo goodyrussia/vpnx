@@ -143,11 +143,12 @@ object SshEngine {
     }
 
     suspend fun stop() = withContext(Dispatchers.IO) {
-        if (isRunning.compareAndSet(true, false)) {
-            runCatching { localSocksServer?.stop() }
-            localSocksServer = null
-            runCatching { sshClient?.disconnect() }
-            sshClient = null
+        val wasRunning = isRunning.getAndSet(false)
+        runCatching { localSocksServer?.stop() }
+        localSocksServer = null
+        runCatching { sshClient?.disconnect() }
+        sshClient = null
+        if (wasRunning) {
             Log.i(TAG, "SSH tunnel stopped")
         }
     }

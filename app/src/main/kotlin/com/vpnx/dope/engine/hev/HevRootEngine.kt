@@ -32,7 +32,7 @@ object HevRootEngine {
 
         // Extract to internal storage if not executable directly from libDir
         val target = File(context.filesDir, "hev-socks5-tunnel-cli")
-        if (!target.exists() || target.length() == 0L) {
+        if (!target.exists() || target.length() == 0L || (cliInLib.exists() && target.length() != cliInLib.length())) {
             if (cliInLib.exists()) {
                 cliInLib.inputStream().use { input ->
                     FileOutputStream(target).use { output -> input.copyTo(output) }

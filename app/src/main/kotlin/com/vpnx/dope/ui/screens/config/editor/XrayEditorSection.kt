@@ -18,21 +18,23 @@ fun XrayEditorSection(
     onStateChange: (ProfileEntity) -> Unit
 ) {
     val protocols = listOf("VLESS", "VMESS", "TROJAN", "SHADOWSOCKS", "HYSTERIA2")
-    val selectedProtoIdx = protocols.indexOf(state.xrayProtocol).coerceAtLeast(0)
+    val selectedProtoIdx = protocols.indexOf(state.xrayProtocol).let { if (it >= 0) it else 0 }.coerceIn(protocols.indices)
 
     val transports = listOf("tcp", "ws", "grpc", "httpupgrade")
-    val selectedTransportIdx = transports.indexOf(state.transport.lowercase()).coerceAtLeast(0)
+    val selectedTransportIdx = transports.indexOf(state.transport.lowercase()).let { if (it >= 0) it else 0 }.coerceIn(transports.indices)
 
     val securities = listOf("none", "tls", "reality")
-    val selectedSecurityIdx = securities.indexOf(state.security.lowercase()).coerceAtLeast(0)
+    val selectedSecurityIdx = securities.indexOf(state.security.lowercase()).let { if (it >= 0) it else 0 }.coerceIn(securities.indices)
 
     Column(modifier = Modifier.fillMaxWidth()) {
         OverlayDropdownPreference(
             items = protocols,
             selectedIndex = selectedProtoIdx,
             title = "Protocol",
+            renderInRootScaffold = false,
             onSelectedIndexChange = { idx ->
-                onStateChange(state.copy(xrayProtocol = protocols[idx]))
+                val safeIdx = idx.coerceIn(protocols.indices)
+                onStateChange(state.copy(xrayProtocol = protocols[safeIdx]))
             }
         )
         Spacer(modifier = Modifier.height(12.dp))
@@ -103,8 +105,10 @@ fun XrayEditorSection(
             items = listOf("None", "TLS", "REALITY"),
             selectedIndex = selectedSecurityIdx,
             title = "Security",
+            renderInRootScaffold = false,
             onSelectedIndexChange = { idx ->
-                onStateChange(state.copy(security = securities[idx]))
+                val safeIdx = idx.coerceIn(securities.indices)
+                onStateChange(state.copy(security = securities[safeIdx]))
             }
         )
         Spacer(modifier = Modifier.height(12.dp))
@@ -131,8 +135,10 @@ fun XrayEditorSection(
             items = listOf("TCP", "WebSocket (ws)", "gRPC", "HTTPUpgrade"),
             selectedIndex = selectedTransportIdx,
             title = "Transport Network",
+            renderInRootScaffold = false,
             onSelectedIndexChange = { idx ->
-                onStateChange(state.copy(transport = transports[idx]))
+                val safeIdx = idx.coerceIn(transports.indices)
+                onStateChange(state.copy(transport = transports[safeIdx]))
             }
         )
         Spacer(modifier = Modifier.height(12.dp))

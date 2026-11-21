@@ -66,6 +66,7 @@ class VpnModeService : VpnService() {
     }
 
     private suspend fun startVpn(profileId: String?) {
+        TrafficStatsTracker.reset()
         ServiceController.updateState(ConnectionState.CONNECTING)
         XrayLogTailer.info("Starting VPN Service mode...")
 
