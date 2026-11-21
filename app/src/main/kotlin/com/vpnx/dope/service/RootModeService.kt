@@ -244,6 +244,8 @@ class RootModeService : Service() {
     }
 
     private suspend fun startProxyEngine(profile: ProfileEntity): Boolean {
+        stopProxyEngine()
+        SshEngine.vpnService = null
         return if (profile.protocolType == "SSH") {
             SshEngine.start(SshProfile.fromEntity(profile), 10808)
         } else {

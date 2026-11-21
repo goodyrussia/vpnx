@@ -179,6 +179,10 @@ fun ProfileEditorSheet(
 
         if (p.protocolType == "SSH") {
             if (p.sshUser.isBlank()) return "SSH username is required."
+            if (p.sshPass.isBlank()) return "SSH password is required."
+            if (p.sshMode !in setOf("DIRECT", "PROXY", "TLS", "PROXY_TLS")) {
+                return "Invalid SSH mode '${p.sshMode}'. Must be DIRECT, PROXY, TLS, or PROXY_TLS."
+            }
             if ((p.sshMode == "PROXY" || p.sshMode == "PROXY_TLS") && p.proxyHost.isBlank()) {
                 return "Proxy host is required for ${p.sshMode} mode."
             }

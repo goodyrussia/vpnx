@@ -126,7 +126,12 @@ object XrayEngine {
             val ctrl = controller
             controller = null
             if (ctrl != null) {
-                runCatching { ctrl.stopLoop() }
+                runCatching { ctrl.stopLoop() }.onFailure { t ->
+                    XrayLogTailer.error(
+                        "Xray stopLoop failed (${t::class.simpleName}): ${t.message ?: "no detail"} (listener may still be held)"
+                    )
+                    Log.e(TAG, "Failed to stop Xray loop", t)
+                }
             }
         }
         if (wasRunning) {

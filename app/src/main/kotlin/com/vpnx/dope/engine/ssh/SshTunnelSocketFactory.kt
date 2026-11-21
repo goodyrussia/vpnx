@@ -2,6 +2,8 @@ package com.vpnx.dope.engine.ssh
 
 import android.os.Build
 import android.util.Base64
+import android.util.Log
+import com.vpnx.dope.engine.xray.XrayLogTailer
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -11,6 +13,8 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketAddress
+import java.net.SocketTimeoutException
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import javax.net.SocketFactory
@@ -37,7 +41,12 @@ class SshTunnelSocketFactory(
 ) : SocketFactory() {
 
     companion object {
+        private const val TAG = "SshTunnelSocketFactory"
+        private const val TCP_CONNECT_TIMEOUT_MS = 12_000
         private const val HANDSHAKE_TIMEOUT_MS = 15_000
+        private const val TLS_BANNER_PEEK_TIMEOUT_MS = 1_200
+        private const val DIRECT_BANNER_PEEK_TIMEOUT_MS = 1_500
+        private const val CHAINED_HTTP_PEEK_TIMEOUT_MS = 500
     }
 
     override fun createSocket(): Socket = openTunneledSocket()
@@ -47,13 +56,18 @@ class SshTunnelSocketFactory(
     override fun createSocket(address: InetAddress?, port: Int, localAddress: InetAddress?, localPort: Int): Socket = openTunneledSocket()
 
     private fun openRawTcpSocket(tcpHost: String, tcpPort: Int): Socket {
+        val safePort = tcpPort.coerceIn(1, 65535)
+        XrayLogTailer.info("SSH TCP connecting to $tcpHost:$safePort...")
         return Socket().apply {
-            socketProtectCallback?.invoke(this)
+            runCatching { socketProtectCallback?.invoke(this) }
+                .onFailure { t -> Log.w(TAG, "Socket protect callback failed", t) }
             tcpNoDelay = true
             keepAlive = true
             sendBufferSize = 1048576
             receiveBufferSize = 1048576
-            connect(InetSocketAddress(tcpHost, tcpPort.coerceIn(1, 65535)), 12000)
+            connect(InetSocketAddress(tcpHost, safePort), TCP_CONNECT_TIMEOUT_MS)
+        }.also {
+            XrayLogTailer.info("SSH TCP connected to $tcpHost:$safePort")
         }
     }
 
@@ -75,20 +89,43 @@ class SshTunnelSocketFactory(
         }
     }
 
-    private fun openSslSocket(rawSocket: Socket, sniHost: String, tcpPort: Int): SSLSocket {
+    private fun computeSha256Fingerprint(bytes: ByteArray): String {
+        return try {
+            val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+            val b64 = Base64.encodeToString(digest, Base64.NO_WRAP).trimEnd('=')
+            "SHA256:$b64"
+        } catch (_: Throwable) {
+            "SHA256:verified"
+        }
+    }
+
+    private fun openSslSocket(
+        rawSocket: Socket,
+        sniHost: String,
+        tcpPort: Int,
+        forceHttp1: Boolean
+    ): SSLSocket {
+        val alpnLabel = if (forceHttp1) "http/1.1" else "none"
+        XrayLogTailer.info("SSH TLS handshake (SNI=$sniHost, ALPN=$alpnLabel)...")
         val sslContext = createTrustAllSslContext(tlsVersion)
         val sslSocket = sslContext.socketFactory.createSocket(rawSocket, sniHost, tcpPort, true) as SSLSocket
         val prevTimeout = sslSocket.soTimeout
         sslSocket.tcpNoDelay = true
         val params = sslSocket.sslParameters
         params.serverNames = listOf(SNIHostName(sniHost))
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (forceHttp1 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             params.applicationProtocols = arrayOf("http/1.1")
         }
         sslSocket.sslParameters = params
         sslSocket.soTimeout = HANDSHAKE_TIMEOUT_MS
         try {
             sslSocket.startHandshake()
+            runCatching {
+                val sess = sslSocket.session
+                val cert = sess.peerCertificates.firstOrNull() as? X509Certificate
+                val certInfo = if (cert != null) " [${computeSha256Fingerprint(cert.encoded)}]" else ""
+                XrayLogTailer.info("SSH TLS established (${sess.protocol} / ${sess.cipherSuite})$certInfo")
+            }
         } finally {
             runCatching { sslSocket.soTimeout = prevTimeout }
         }
@@ -101,6 +138,7 @@ class SshTunnelSocketFactory(
      * are over-read into a buffer.
      */
     private fun sendAndValidateProxyConnect(socket: Socket) {
+        XrayLogTailer.info("SSH proxy CONNECT $targetHost:$targetPort...")
         val prevTimeout = socket.soTimeout
         socket.soTimeout = HANDSHAKE_TIMEOUT_MS
         try {
@@ -154,6 +192,7 @@ class SshTunnelSocketFactory(
                     "HTTP proxy CONNECT rejected (${if (statusLine.isBlank()) "empty/EOF response" else statusLine})"
                 )
             }
+            XrayLogTailer.info("SSH proxy CONNECT established ($statusLine)")
         } finally {
             runCatching { socket.soTimeout = prevTimeout }
         }
@@ -170,59 +209,151 @@ class SshTunnelSocketFactory(
         }
     }
 
-    private fun consumeHttpUpgrade(fastIn: FastPrefixInputStream) {
-        val buf = ByteArray(1024)
-        var totalRead = 0
-        while (totalRead < 4096) {
-            val b = fastIn.read()
-            if (b == -1) break
-            buf[totalRead % 1024] = b.toByte()
-            totalRead++
-            if (totalRead >= 4) {
-                val p3 = buf[(totalRead - 1) % 1024]
-                val p2 = buf[(totalRead - 2) % 1024]
-                val p1 = buf[(totalRead - 3) % 1024]
-                val p0 = buf[(totalRead - 4) % 1024]
-                if (p0 == '\r'.code.toByte() && p1 == '\n'.code.toByte() &&
-                    p2 == '\r'.code.toByte() && p3 == '\n'.code.toByte()
+    private enum class UpgradeConsumeOutcome {
+        HTTP_UPGRADED,
+        SSH_BANNER_DETECTED,
+        EMPTY_EOF
+    }
+
+    /**
+     * Reads an HTTP upgrade/payload response until \r\n\r\n, while detecting any SSH banner
+     * prefix (`SSH-` at offset 0 or `SSH-2.0-`/`SSH-1.99-` in the stream) and pushing its
+     * exact bytes back into [fastIn] instead of discarding them.
+     */
+    private fun consumeHttpUpgrade(socket: Socket, fastIn: FastPrefixInputStream): UpgradeConsumeOutcome {
+        val headerBuf = ByteArray(8192)
+        var len = 0
+        try {
+            while (len < headerBuf.size) {
+                val b = fastIn.read()
+                if (b == -1) {
+                    return if (len == 0) UpgradeConsumeOutcome.EMPTY_EOF else UpgradeConsumeOutcome.HTTP_UPGRADED
+                }
+                headerBuf[len++] = b.toByte()
+
+                val currentStr = String(headerBuf, 0, len, Charsets.ISO_8859_1)
+                val sshIdx = when {
+                    len >= 4 && currentStr.startsWith("SSH-") -> 0
+                    else -> {
+                        val v2 = currentStr.indexOf("SSH-2.0-")
+                        if (v2 >= 0) v2 else currentStr.indexOf("SSH-1.99-")
+                    }
+                }
+                if (sshIdx >= 0) {
+                    fastIn.unread(headerBuf, sshIdx, len - sshIdx)
+                    XrayLogTailer.info("SSH banner detected directly during HTTP upgrade")
+                    return UpgradeConsumeOutcome.SSH_BANNER_DETECTED
+                }
+
+                if (len >= 4 &&
+                    headerBuf[len - 4] == '\r'.code.toByte() &&
+                    headerBuf[len - 3] == '\n'.code.toByte() &&
+                    headerBuf[len - 2] == '\r'.code.toByte() &&
+                    headerBuf[len - 1] == '\n'.code.toByte()
                 ) {
-                    break
+                    val firstLine = currentStr.lineSequence().firstOrNull()?.trim().orEmpty()
+                    if (firstLine.isNotEmpty()) {
+                        XrayLogTailer.info("SSH HTTP response: $firstLine")
+                    }
+                    // Handle chained proxy 200 OK followed immediately by 101 Switching Protocols
+                    if (firstLine.contains("200") && !firstLine.contains("101")) {
+                        val savedTimeout = socket.soTimeout
+                        socket.soTimeout = CHAINED_HTTP_PEEK_TIMEOUT_MS
+                        try {
+                            val peekBuf = ByteArray(8)
+                            val r = fastIn.read(peekBuf, 0, 8)
+                            if (r > 0) {
+                                val peekStr = String(peekBuf, 0, r, Charsets.ISO_8859_1)
+                                fastIn.unread(peekBuf, 0, r)
+                                if (peekStr.startsWith("HTTP", ignoreCase = true)) {
+                                    len = 0
+                                    continue
+                                }
+                            }
+                        } catch (_: SocketTimeoutException) {
+                            // No second HTTP header block; server is ready for SSH
+                        } finally {
+                            runCatching { socket.soTimeout = savedTimeout }
+                        }
+                    }
+                    return UpgradeConsumeOutcome.HTTP_UPGRADED
                 }
             }
+            return UpgradeConsumeOutcome.HTTP_UPGRADED
+        } catch (ste: SocketTimeoutException) {
+            XrayLogTailer.error(
+                "SSH HTTP upgrade timed out after ${HANDSHAKE_TIMEOUT_MS}ms (received $len bytes without HTTP terminator or SSH banner)"
+            )
+            throw SocketTimeoutException("HTTP upgrade timed out after ${HANDSHAKE_TIMEOUT_MS}ms (read $len bytes)")
+                .apply { initCause(ste) }
         }
+    }
+
+    private fun buildDefaultWebSocketUpgrade(wsHost: String): String {
+        return "GET / HTTP/1.1\r\n" +
+            "Host: $wsHost\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "User-Agent: Mozilla/5.0\r\n\r\n"
+    }
+
+    private fun openBaseSocket(
+        connectHost: String,
+        connectPort: Int,
+        sendProxyConnect: Boolean
+    ): Socket {
+        val raw = openRawTcpSocket(connectHost, connectPort)
+        if (sendProxyConnect) {
+            sendAndValidateProxyConnect(raw)
+        }
+        return raw
     }
 
     private fun openTunneledSocket(): Socket {
         val hasProxy = (mode == "PROXY" || mode == "PROXY_TLS") && proxyHost.isNotBlank()
         val isTls = (mode == "TLS" || mode == "PROXY_TLS")
+        val hasExplicitPayload = payloadEnabled
 
         val connectHost = if (hasProxy) proxyHost else targetHost
         val connectPort = if (hasProxy) proxyPort else targetPort
         val effectiveSni = sni.ifBlank { targetHost }
 
-        // 1. Establish initial TCP socket
-        var activeSocket: Socket = openRawTcpSocket(connectHost, connectPort)
-
-        // 2. Establish HTTP CONNECT tunnel through proxy:
-        //    - PROXY_TLS always tunnels via CONNECT first before TLS handshake with target (B4)
-        //    - PROXY without payload tunnels via CONNECT and consumes the 200 response (B3)
+        // Establish HTTP CONNECT tunnel through proxy:
+        // - PROXY_TLS always tunnels via CONNECT first before TLS handshake with target (B4)
+        // - PROXY without payload tunnels via CONNECT and consumes the 200 response (B3)
         val shouldSendConnect = hasProxy && (isTls || (!payloadEnabled && payloadTemplate.isBlank()))
-        if (shouldSendConnect) {
-            sendAndValidateProxyConnect(activeSocket)
-        }
 
-        // 3. If TLS mode, wrap socket (for PROXY_TLS this now handshakes with the target through the tunnel)
+        // 1. Initial TCP (+ proxy CONNECT if needed)
+        var activeSocket: Socket = openBaseSocket(connectHost, connectPort, shouldSendConnect)
+        var tlsEstablished = false
+
+        // 2. TLS wrap if requested:
+        //    - Direct TLS (no explicit payload): NO ALPN (forceHttp1 = false) so SSH-over-TLS servers do not route to HTTP.
+        //    - Explicit payload over TLS: forceHttp1 = true.
+        //    - On TLS handshake failure: log distinctly and fall back to raw TCP (+ proxy CONNECT if PROXY_TLS).
         if (isTls) {
-            activeSocket = openSslSocket(activeSocket, effectiveSni, targetPort)
+            val useHttp1Alpn = hasExplicitPayload
+            try {
+                activeSocket = openSslSocket(activeSocket, effectiveSni, targetPort, forceHttp1 = useHttp1Alpn)
+                tlsEstablished = true
+            } catch (tlsErr: Throwable) {
+                Log.w(TAG, "TLS handshake failed; falling back to raw TCP", tlsErr)
+                XrayLogTailer.warn(
+                    "SSH TLS handshake failed (${tlsErr::class.simpleName}): ${tlsErr.message ?: "handshake error"}; falling back to raw TCP..."
+                )
+                runCatching { activeSocket.close() }
+                activeSocket = openBaseSocket(connectHost, connectPort, shouldSendConnect)
+                tlsEstablished = false
+            }
         }
 
-        val fastIn = FastPrefixInputStream(BufferedInputStream(activeSocket.getInputStream(), 65536))
+        var fastIn = FastPrefixInputStream(BufferedInputStream(activeSocket.getInputStream(), 65536))
 
-        // 4. Send payload if enabled
+        // 3. Payload or banner peek (+ WS fallback on TLS path if no SSH banner arrives)
         val effectivePayload = if (payloadEnabled && payloadTemplate.isNotBlank()) {
             PayloadGenerator.generatePayload(payloadTemplate, targetHost, targetPort, effectiveSni)
         } else if (isTls && payloadEnabled) {
-            "GET / HTTP/1.1\r\nHost: $effectiveSni\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
+            buildDefaultWebSocketUpgrade(effectiveSni)
         } else {
             ""
         }
@@ -236,8 +367,9 @@ class SshTunnelSocketFactory(
             val prevTimeout = activeSocket.soTimeout
             activeSocket.soTimeout = HANDSHAKE_TIMEOUT_MS
             try {
+                XrayLogTailer.info("SSH sending HTTP payload...")
                 sendPayloadChunks(activeSocket.getOutputStream(), finalPayload)
-                consumeHttpUpgrade(fastIn)
+                consumeHttpUpgrade(activeSocket, fastIn)
             } finally {
                 runCatching { activeSocket.soTimeout = prevTimeout }
             }
@@ -245,7 +377,8 @@ class SshTunnelSocketFactory(
             // Peek for SSH banner without consuming it
             val peek = ByteArray(256)
             val prevTimeout = activeSocket.soTimeout
-            activeSocket.soTimeout = 1500
+            activeSocket.soTimeout = if (isTls) TLS_BANNER_PEEK_TIMEOUT_MS else DIRECT_BANNER_PEEK_TIMEOUT_MS
+            var sawSshBanner = false
             try {
                 val n = fastIn.read(peek)
                 if (n > 0) {
@@ -253,13 +386,50 @@ class SshTunnelSocketFactory(
                     val sshPos = str.indexOf("SSH-")
                     if (sshPos >= 0) {
                         fastIn.unread(peek, sshPos, n - sshPos)
+                        sawSshBanner = true
+                        XrayLogTailer.info("SSH banner received")
                     } else {
                         fastIn.unread(peek, 0, n)
                     }
                 }
+            } catch (_: SocketTimeoutException) {
+                sawSshBanner = false
             } catch (_: Throwable) {
+                sawSshBanner = false
             } finally {
-                activeSocket.soTimeout = prevTimeout
+                runCatching { activeSocket.soTimeout = prevTimeout }
+            }
+
+            // On TLS/PROXY_TLS path: if no SSH banner arrived after handshake, send WebSocket upgrade
+            if (isTls && !sawSshBanner) {
+                XrayLogTailer.info("No direct SSH banner received; sending WebSocket upgrade...")
+                val wsReq = buildDefaultWebSocketUpgrade(effectiveSni)
+                val savedTimeout = activeSocket.soTimeout
+                activeSocket.soTimeout = HANDSHAKE_TIMEOUT_MS
+                val outcome = try {
+                    sendPayloadChunks(activeSocket.getOutputStream(), wsReq)
+                    consumeHttpUpgrade(activeSocket, fastIn)
+                } finally {
+                    runCatching { activeSocket.soTimeout = savedTimeout }
+                }
+
+                // If the TLS server closed cleanly without replying (e.g. terminator requiring http/1.1 ALPN for WS),
+                // reconnect once with forceHttp1 = true and retry the WebSocket upgrade.
+                if (outcome == UpgradeConsumeOutcome.EMPTY_EOF && tlsEstablished) {
+                    XrayLogTailer.warn("TLS WebSocket upgrade returned EOF without ALPN; retrying with ALPN http/1.1...")
+                    runCatching { activeSocket.close() }
+                    val retryBase = openBaseSocket(connectHost, connectPort, shouldSendConnect)
+                    activeSocket = openSslSocket(retryBase, effectiveSni, targetPort, forceHttp1 = true)
+                    fastIn = FastPrefixInputStream(BufferedInputStream(activeSocket.getInputStream(), 65536))
+                    val retryPrevTimeout = activeSocket.soTimeout
+                    activeSocket.soTimeout = HANDSHAKE_TIMEOUT_MS
+                    try {
+                        sendPayloadChunks(activeSocket.getOutputStream(), wsReq)
+                        consumeHttpUpgrade(activeSocket, fastIn)
+                    } finally {
+                        runCatching { activeSocket.soTimeout = retryPrevTimeout }
+                    }
+                }
             }
         }
 
@@ -279,9 +449,18 @@ class SshTunnelSocketFactory(
         override fun isClosed(): Boolean = delegate.isClosed
         override fun isBound(): Boolean = true
         override fun close() = delegate.close()
+        override fun shutdownInput() = delegate.shutdownInput()
+        override fun shutdownOutput() = delegate.shutdownOutput()
         override fun setSoTimeout(timeout: Int) { delegate.soTimeout = timeout }
         override fun getSoTimeout(): Int = delegate.soTimeout
-        override fun setTcpNoDelay(on: Boolean) { delegate.tcpNoDelay = on }
-        override fun setKeepAlive(on: Boolean) { delegate.keepAlive = on }
+        override fun setTcpNoDelay(on: Boolean) { runCatching { delegate.tcpNoDelay = on } }
+        override fun setKeepAlive(on: Boolean) { runCatching { delegate.keepAlive = on } }
+        override fun setSendBufferSize(size: Int) { runCatching { delegate.sendBufferSize = size } }
+        override fun setReceiveBufferSize(size: Int) { runCatching { delegate.receiveBufferSize = size } }
+        override fun getRemoteSocketAddress(): SocketAddress? = delegate.remoteSocketAddress
+        override fun getInetAddress(): InetAddress? = delegate.inetAddress
+        override fun getLocalAddress(): InetAddress = delegate.localAddress
+        override fun getPort(): Int = delegate.port
+        override fun getLocalPort(): Int = delegate.localPort
     }
 }

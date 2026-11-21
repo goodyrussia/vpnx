@@ -293,6 +293,7 @@ class VpnModeService : VpnService() {
     }
 
     private suspend fun startProxyEngine(profile: ProfileEntity): Boolean {
+        stopProxyEngine()
         return if (profile.protocolType == "SSH") {
             SshEngine.vpnService = this
             SshEngine.start(SshProfile.fromEntity(profile), 10808)

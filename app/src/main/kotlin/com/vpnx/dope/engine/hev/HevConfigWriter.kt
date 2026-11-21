@@ -34,23 +34,27 @@ object HevConfigWriter {
     ): String {
         val yaml = """
             tunnel:
-              name: '$tunName'
+              name: '${tunName.escapeYamlSingleQuoted()}'
               mtu: $mtu
-              ipv4: '$ipv4'
-              ipv6: '$ipv6'
+              multi-queue: true
+              ipv4: '${ipv4.escapeYamlSingleQuoted()}'
+              ipv6: '${ipv6.escapeYamlSingleQuoted()}'
             socks5:
               port: $socksPort
               address: '127.0.0.1'
               udp: 'udp'
               mark: $fwmark
+              tcp-fastopen: true
             misc:
               limit-nofile: 65535
-              log-file: '${logFile.absolutePath}'
+              log-file: '${logFile.absolutePath.escapeYamlSingleQuoted()}'
               log-level: 'warn'
-              pid-file: '${pidFile.absolutePath}'
+              pid-file: '${pidFile.absolutePath.escapeYamlSingleQuoted()}'
         """.trimIndent()
         outFile.parentFile?.mkdirs()
         outFile.writeText(yaml)
         return outFile.absolutePath
     }
+
+    private fun String.escapeYamlSingleQuoted(): String = replace("'", "''")
 }
