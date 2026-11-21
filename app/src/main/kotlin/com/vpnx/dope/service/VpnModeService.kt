@@ -205,13 +205,18 @@ class VpnModeService : VpnService() {
                 return
             }
 
-            // 2. Build Android OS VpnService TUN interface (IPv4 + IPv6 to prevent IPv6 leak)
+            // 2. Build Android OS VpnService TUN interface (skip IPv6 in SSH mode; preserve IPv4 + IPv6 for Xray)
+            val isSsh = profile.protocolType == "SSH"
             val builder = Builder().apply {
                 setMtu(settings.tunnelMtu)
                 addAddress("10.0.0.2", 24)
-                addAddress("fc00::2", 126)
+                if (!isSsh) {
+                    addAddress("fc00::2", 126)
+                }
                 addRoute("0.0.0.0", 0)
-                addRoute("::", 0)
+                if (!isSsh) {
+                    addRoute("::", 0)
+                }
                 addDnsServer(resolvedPrimaryDns)
                 if (resolvedSecondaryDns != null) {
                     addDnsServer(resolvedSecondaryDns)

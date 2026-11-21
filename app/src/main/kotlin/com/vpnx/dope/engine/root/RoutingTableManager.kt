@@ -2,6 +2,7 @@ package com.vpnx.dope.engine.root
 
 import android.os.Process
 import android.util.Log
+import com.vpnx.dope.engine.ssh.SshEngine
 import com.vpnx.dope.engine.xray.XrayLogTailer
 
 object RoutingTableManager {
@@ -20,15 +21,20 @@ object RoutingTableManager {
     }
 
     /**
-     * Applies IPv4 and IPv6 policy routing rules (pref 5, 10, 15, 20) in persistent root shell:
+     * Applies IPv4 (and optionally IPv6) policy routing rules (pref 5, 10, 15, 20) in persistent root shell:
      * 1. App UID bypass (pref 5): Outbound traffic from this app routes via table main (DIRECT)
      * 2. Hev mark bypass (pref 10): Outbound sockets marked 438 route via table main (DIRECT)
      * 3. Hotspot mark routing (pref 15): Tethered packets marked 100 route into table 100 dev vpnx0
      * 4. Capture default route (pref 20): All remaining device traffic goes into table 100 dev vpnx0
      *
+     * Skips IPv6 capture when [enableIpv6] is false (defaulting to false when [SshEngine] is active
+     * so IPv6 SYNs do not hang in SSH mode while preserving Xray-mode IPv6 routing unchanged).
      * Pre-cleans only stale rules/routes/marks via [teardownRulesOnly] — never deletes [TUN_DEV].
      */
-    suspend fun applyRules(appUid: Int = Process.myUid()): Boolean {
+    suspend fun applyRules(
+        appUid: Int = Process.myUid(),
+        enableIpv6: Boolean = !SshEngine.isRunning()
+    ): Boolean {
         teardownRulesOnly(appUid)
 
         if (!isTunInterfaceUp()) {
@@ -38,36 +44,42 @@ object RoutingTableManager {
             return false
         }
 
-        val commands = listOf(
+        val commands = buildList {
             // Ensure TUN link is administratively up before installing routes
-            "ip link set dev $TUN_DEV up",
+            add("ip link set dev $TUN_DEV up")
 
             // --- IPv4 ---
             // 1. App UID bypass (pref 5)
-            "ip rule add uidrange $appUid-$appUid lookup main pref 5",
-            "iptables -t mangle -A OUTPUT -m owner --uid-owner $appUid -j MARK --set-mark $FWMARK",
+            add("ip rule add uidrange $appUid-$appUid lookup main pref 5")
+            add("iptables -t mangle -A OUTPUT -m owner --uid-owner $appUid -j MARK --set-mark $FWMARK")
 
             // 2. Hev daemon fwmark bypass (pref 10)
-            "ip rule add fwmark $FWMARK lookup main pref 10",
+            add("ip rule add fwmark $FWMARK lookup main pref 10")
 
             // 3. Hotspot marked packets into table 100 (pref 15)
-            "ip rule add fwmark $HOTSPOT_FWMARK lookup $TABLE_ID pref 15",
+            add("ip rule add fwmark $HOTSPOT_FWMARK lookup $TABLE_ID pref 15")
 
             // 4. TUN default route into table 100 (pref 20) — replace is idempotent
-            "ip route replace default dev $TUN_DEV table $TABLE_ID",
-            "ip rule add from all lookup $TABLE_ID pref 20",
+            add("ip route replace default dev $TUN_DEV table $TABLE_ID")
+            add("ip rule add from all lookup $TABLE_ID pref 20")
 
             // 5. Relax reverse-path filtering (best-effort if sysctl binary is absent)
-            "echo 0 > /proc/sys/net/ipv4/conf/$TUN_DEV/rp_filter 2>/dev/null || sysctl -w net.ipv4.conf.$TUN_DEV.rp_filter=0 2>/dev/null || true",
+            add("echo 0 > /proc/sys/net/ipv4/conf/$TUN_DEV/rp_filter 2>/dev/null || sysctl -w net.ipv4.conf.$TUN_DEV.rp_filter=0 2>/dev/null || true")
 
-            // --- IPv6 ---
-            "ip -6 rule add uidrange $appUid-$appUid lookup main pref 5",
-            "ip6tables -t mangle -A OUTPUT -m owner --uid-owner $appUid -j MARK --set-mark $FWMARK",
-            "ip -6 rule add fwmark $FWMARK lookup main pref 10",
-            "ip -6 rule add fwmark $HOTSPOT_FWMARK lookup $TABLE_ID pref 15",
-            "ip -6 route replace default dev $TUN_DEV table $TABLE_ID",
-            "ip -6 rule add from all lookup $TABLE_ID pref 20"
-        )
+            // --- IPv6 (enabled for Xray; skipped in SSH mode where the tunnel is IPv4-only) ---
+            if (enableIpv6) {
+                add("ip -6 rule add uidrange $appUid-$appUid lookup main pref 5")
+                add("ip6tables -t mangle -A OUTPUT -m owner --uid-owner $appUid -j MARK --set-mark $FWMARK")
+                add("ip -6 rule add fwmark $FWMARK lookup main pref 10")
+                add("ip -6 rule add fwmark $HOTSPOT_FWMARK lookup $TABLE_ID pref 15")
+                add("ip -6 route replace default dev $TUN_DEV table $TABLE_ID")
+                add("ip -6 rule add from all lookup $TABLE_ID pref 20")
+            }
+        }
+
+        if (!enableIpv6) {
+            XrayLogTailer.info("Root routing: skipping IPv6 capture rules in SSH mode (IPv4 full tunnel active)")
+        }
 
         for (cmd in commands) {
             val res = RootShellManager.exec(cmd)

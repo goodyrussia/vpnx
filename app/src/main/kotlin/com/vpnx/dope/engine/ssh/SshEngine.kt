@@ -25,6 +25,10 @@ import net.schmizz.sshj.transport.verification.HostKeyVerifier
 import net.schmizz.sshj.userauth.method.AuthKeyboardInteractive
 import net.schmizz.sshj.userauth.method.ChallengeResponseProvider
 import net.schmizz.sshj.userauth.password.Resource
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.BindException
@@ -32,6 +36,10 @@ import java.security.KeyPairGenerator
 import java.security.MessageDigest
 import java.security.PublicKey
 import java.util.Collections
+import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
@@ -40,6 +48,11 @@ object SshEngine {
     private const val SSH_CONNECT_TIMEOUT_MS = 15_000
     private const val SSH_OPERATION_TIMEOUT_MS = 30_000
     private const val SOCKS_BIND_RETRY_DELAY_MS = 1_000L
+    private const val DNS_TCP_TIMEOUT_MS = 2_500L
+    private const val DNS_CACHE_TTL_MS = 600_000L
+    private const val MAX_DNS_CACHE_ENTRIES = 512
+
+    private data class DnsCacheRecord(val response: ByteArray, val expireAt: Long)
 
     @Volatile
     var vpnService: VpnService? = null
@@ -48,6 +61,10 @@ object SshEngine {
     private val activeClientRef = AtomicReference<SSHClient?>(null)
     private val localSocksRef = AtomicReference<LocalSocksServer?>(null)
     private val isRunning = AtomicBoolean(false)
+    private val dnsCache = ConcurrentHashMap<String, DnsCacheRecord>()
+    private val dnsExecutor = Executors.newCachedThreadPool { r ->
+        Thread(r, "SshDnsResolver").apply { isDaemon = true }
+    }
 
     private fun isX25519Supported(): Boolean {
         return try {
@@ -236,8 +253,121 @@ object SshEngine {
         }
     }
 
+    /**
+     * Resolves a raw DNS wire query strictly inside the SSH tunnel via DNS-over-TCP (port 53).
+     * Never sends direct/bypassed UDP queries outside the tunnel.
+     */
+    fun resolveDnsViaSsh(preferredDns: String, dnsQuery: ByteArray): ByteArray? {
+        if (dnsQuery.size < 12) return null
+
+        val now = System.currentTimeMillis()
+        val keyLen = minOf(dnsQuery.size, 128) - 2
+        val cacheKey = if (keyLen > 0) {
+            Base64.encodeToString(dnsQuery, 2, keyLen, Base64.NO_WRAP)
+        } else {
+            null
+        }
+
+        if (cacheKey != null) {
+            val cached = dnsCache[cacheKey]
+            if (cached != null) {
+                if (now < cached.expireAt && cached.response.size >= 2) {
+                    val reply = cached.response.copyOf()
+                    reply[0] = dnsQuery[0]
+                    reply[1] = dnsQuery[1]
+                    return reply
+                } else {
+                    dnsCache.remove(cacheKey, cached)
+                }
+            }
+        }
+
+        val client = activeClientRef.get()
+        if (client == null || !client.isConnected || !client.isAuthenticated) {
+            XrayLogTailer.error("SSH DNS-over-TCP failed: SSH session is not connected/authenticated")
+            return null
+        }
+
+        val dnsServers = listOf("1.1.1.1", "8.8.8.8", preferredDns.trim())
+            .filter { it.isNotBlank() && !it.contains(":") }
+            .distinct()
+
+        var lastError: Throwable? = null
+        for (dnsIp in dnsServers) {
+            val (reply, err) = queryDnsOverSshChannelWithTimeout(client, dnsIp, dnsQuery, DNS_TCP_TIMEOUT_MS)
+            if (reply != null && reply.size >= 2) {
+                if (cacheKey != null) {
+                    if (dnsCache.size >= MAX_DNS_CACHE_ENTRIES) {
+                        dnsCache.entries.removeIf { it.value.expireAt <= now }
+                        if (dnsCache.size >= MAX_DNS_CACHE_ENTRIES) {
+                            dnsCache.clear()
+                        }
+                    }
+                    dnsCache[cacheKey] = DnsCacheRecord(reply.copyOf(), now + DNS_CACHE_TTL_MS)
+                }
+                return reply
+            }
+            if (err != null) {
+                lastError = err
+            }
+        }
+
+        val detail = lastError?.let { "${it::class.simpleName}: ${it.message ?: "no detail"}" } ?: "no valid response"
+        Log.w(TAG, "SSH DNS-over-TCP failed across $dnsServers: $detail", lastError)
+        XrayLogTailer.error("SSH DNS-over-TCP failed (${dnsServers.joinToString(",")}): $detail")
+        return null
+    }
+
+    private fun queryDnsOverSshChannelWithTimeout(
+        client: SSHClient,
+        dnsIp: String,
+        dnsQuery: ByteArray,
+        timeoutMs: Long
+    ): Pair<ByteArray?, Throwable?> {
+        val channelRef = AtomicReference<DirectTCPIPChannel?>(null)
+        val future = dnsExecutor.submit(Callable<Pair<ByteArray?, Throwable?>> {
+            try {
+                val channel = DirectConnection(client.connection, dnsIp, 53)
+                channelRef.set(channel)
+                channel.open()
+
+                val dos = DataOutputStream(BufferedOutputStream(channel.outputStream, 1024))
+                val dis = DataInputStream(BufferedInputStream(channel.inputStream, 2048))
+                dos.writeShort(dnsQuery.size)
+                dos.write(dnsQuery)
+                dos.flush()
+                TrafficStatsTracker.addTx((dnsQuery.size + 2).toLong())
+
+                val replyLen = dis.readUnsignedShort()
+                if (replyLen in 1..4096) {
+                    val replyPayload = ByteArray(replyLen)
+                    dis.readFully(replyPayload)
+                    TrafficStatsTracker.addRx((replyLen + 2).toLong())
+                    replyPayload to null
+                } else {
+                    null to IllegalStateException("Invalid DNS TCP response length: $replyLen")
+                }
+            } catch (t: Throwable) {
+                null to t
+            } finally {
+                runCatching { channelRef.getAndSet(null)?.close() }
+            }
+        })
+
+        return try {
+            future.get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (t: Throwable) {
+            future.cancel(true)
+            runCatching { channelRef.getAndSet(null)?.close() }
+            null to t
+        }
+    }
+
     private suspend fun startLocalSocksWithRetry(client: SSHClient, socksPort: Int): LocalSocksServer? {
-        fun buildServer(): LocalSocksServer = LocalSocksServer(bindPort = socksPort) { targetHost, targetPort, clientIn, clientOut ->
+        fun buildServer(): LocalSocksServer = LocalSocksServer(
+            bindPort = socksPort,
+            dnsResolver = ::resolveDnsViaSsh
+        ) { targetHost, targetPort, clientIn, clientOut ->
             forwardSocksConnection(client, targetHost, targetPort, clientIn, clientOut)
         }
 
@@ -321,6 +451,7 @@ object SshEngine {
 
     private fun stopInternal() {
         val wasRunning = isRunning.getAndSet(false)
+        dnsCache.clear()
         val socks = localSocksRef.getAndSet(null)
         runCatching { socks?.stop() }
         val client = activeClientRef.getAndSet(null)
