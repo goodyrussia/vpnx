@@ -1,6 +1,9 @@
 package com.vpnx.dope.engine.xray
 
+import android.annotation.SuppressLint
 import android.content.Context
+import android.provider.Settings
+import android.util.Base64
 import android.util.Log
 import com.vpnx.dope.data.model.XrayProfile
 import go.Seq
@@ -11,20 +14,63 @@ import libv2ray.CoreController
 import libv2ray.Libv2ray
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 object XrayEngine {
     private const val TAG = "XrayEngine"
+    private const val XRAY_CORE_BASE_KEY_LENGTH = 32
+
     private val lock = Any()
+    private val coreEnvLock = Any()
+    private val initializedAssetsDir = AtomicReference<String?>(null)
+
     @Volatile
     private var controller: CoreController? = null
     private val isRunning = AtomicBoolean(false)
 
-    private fun initCoreEnv(context: Context) {
-        runCatching {
-            Seq.setContext(context.applicationContext)
-            val assetsDir = File(context.filesDir, "xray-assets").apply { mkdirs() }
-            Libv2ray.initCoreEnv(assetsDir.absolutePath, "vpnx-core-key-16b")
+    fun initCoreEnv(context: Context) {
+        val appContext = context.applicationContext
+        val assetsDir = File(appContext.filesDir, "xray-assets").apply { mkdirs() }
+        val assetsPath = assetsDir.absolutePath
+
+        if (initializedAssetsDir.get() == assetsPath) {
+            return
         }
+
+        synchronized(coreEnvLock) {
+            if (initializedAssetsDir.get() == assetsPath) {
+                return
+            }
+            try {
+                Seq.setContext(appContext)
+                Libv2ray.initCoreEnv(assetsPath, xrayCoreBaseKey(appContext))
+                initializedAssetsDir.set(assetsPath)
+            } catch (t: Throwable) {
+                XrayLogTailer.error("Failed to initialize Xray core environment: ${t.message}")
+                Log.e(TAG, "Failed to initialize Xray core environment", t)
+            }
+        }
+    }
+
+    @SuppressLint("HardwareIds")
+    private fun xrayCoreBaseKey(context: Context): String {
+        val deviceId = runCatching {
+            Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+        }.getOrNull()
+            .orEmpty()
+            .ifBlank { context.packageName }
+
+        return deviceId
+            .toByteArray(Charsets.UTF_8)
+            .copyOf(XRAY_CORE_BASE_KEY_LENGTH)
+            .encodeUrlSafeBase64NoPadding()
+    }
+
+    private fun ByteArray.encodeUrlSafeBase64NoPadding(): String {
+        return Base64.encodeToString(
+            this,
+            Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP
+        )
     }
 
     suspend fun start(

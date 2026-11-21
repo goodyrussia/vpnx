@@ -3,19 +3,24 @@ package com.vpnx.dope.service
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.vpnx.dope.data.model.ConnectionState
 import com.vpnx.dope.data.repository.SettingsRepository
 import com.vpnx.dope.engine.hev.HevRootEngine
 import com.vpnx.dope.engine.xray.XrayLogTailer
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 object ServiceController {
+
+    private const val TAG = "ServiceController"
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -24,7 +29,14 @@ object ServiceController {
     @Volatile
     private var pendingProfileId: String? = null
 
-    private val controllerScope = CoroutineScope(Dispatchers.Main)
+    private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        Log.e(TAG, "Uncaught error in ServiceController", throwable)
+        XrayLogTailer.error("Tunnel controller error: ${throwable.message}")
+        updateState(ConnectionState.DISCONNECTED)
+        pendingProfileId = null
+    }
+
+    private val controllerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main + exceptionHandler)
 
     fun updateState(newState: ConnectionState) {
         _connectionState.value = newState
@@ -58,7 +70,13 @@ object ServiceController {
                     action = RootModeService.ACTION_START
                     putExtra(RootModeService.EXTRA_PROFILE_ID, profileId)
                 }
-                ContextCompat.startForegroundService(context, intent)
+                try {
+                    ContextCompat.startForegroundService(context, intent)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Failed to start RootModeService", t)
+                    XrayLogTailer.error("Failed to start Root service: ${t.message}")
+                    updateState(ConnectionState.DISCONNECTED)
+                }
             }
         } else {
             // VPN Service Mode (Zero root operations)
@@ -68,7 +86,15 @@ object ServiceController {
                     pendingProfileId = profileId
                     updateState(ConnectionState.CONNECTING)
                     XrayLogTailer.warn("OS VPN permission required. Launching system prompt...")
-                    val granted = vpnPermissionRequester.request(prepareIntent)
+                    val granted = try {
+                        vpnPermissionRequester.request(prepareIntent)
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "Failed to request OS VPN permission", t)
+                        XrayLogTailer.error("Failed to request OS VPN permission: ${t.message}")
+                        updateState(ConnectionState.DISCONNECTED)
+                        pendingProfileId = null
+                        return@launch
+                    }
                     if (!granted) {
                         XrayLogTailer.warn("OS VPN permission denied or cancelled by user.")
                         updateState(ConnectionState.DISCONNECTED)
@@ -85,7 +111,14 @@ object ServiceController {
                     action = VpnModeService.ACTION_START
                     putExtra(VpnModeService.EXTRA_PROFILE_ID, activeProfileId)
                 }
-                ContextCompat.startForegroundService(context, intent)
+                try {
+                    ContextCompat.startForegroundService(context, intent)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Failed to start VpnModeService", t)
+                    XrayLogTailer.error("Failed to start VPN service: ${t.message}")
+                    updateState(ConnectionState.DISCONNECTED)
+                    pendingProfileId = null
+                }
             }
         }
     }

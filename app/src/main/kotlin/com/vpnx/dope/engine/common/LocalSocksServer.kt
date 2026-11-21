@@ -10,6 +10,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -20,25 +21,40 @@ class LocalSocksServer(
 ) {
     private var serverSocket: ServerSocket? = null
     private val isRunning = AtomicBoolean(false)
+    private val activeClients = ConcurrentHashMap.newKeySet<Socket>()
     private val executor = Executors.newCachedThreadPool { r ->
         Thread(r, "LocalSocksWorker").apply { isDaemon = true }
     }
 
     fun start() {
         if (isRunning.compareAndSet(false, true)) {
-            serverSocket = ServerSocket().apply {
-                reuseAddress = true
-                receiveBufferSize = 1048576
-                bind(InetSocketAddress(bindHost, bindPort), 512)
+            val server = try {
+                ServerSocket().apply {
+                    reuseAddress = true
+                    receiveBufferSize = 1048576
+                    bind(InetSocketAddress(bindHost, bindPort), 512)
+                }
+            } catch (t: Throwable) {
+                isRunning.set(false)
+                runCatching { serverSocket?.close() }
+                serverSocket = null
+                throw t
             }
+
+            serverSocket = server
             executor.execute {
-                while (isRunning.get()) {
-                    try {
-                        val client = serverSocket?.accept() ?: break
-                        executor.execute { handleClient(client) }
-                    } catch (_: Throwable) {
-                        break
+                try {
+                    while (isRunning.get()) {
+                        try {
+                            val client = server.accept()
+                            activeClients.add(client)
+                            executor.execute { handleClient(client) }
+                        } catch (_: Throwable) {
+                            break
+                        }
                     }
+                } finally {
+                    isRunning.set(false)
                 }
             }
             Log.i("LocalSocksServer", "Local SOCKS5 server listening on $bindHost:$bindPort")
@@ -46,12 +62,16 @@ class LocalSocksServer(
     }
 
     fun stop() {
-        if (isRunning.compareAndSet(true, false)) {
-            runCatching { serverSocket?.close() }
-            serverSocket = null
-            executor.shutdownNow()
-            Log.i("LocalSocksServer", "Local SOCKS5 server stopped")
+        isRunning.set(false)
+        runCatching { serverSocket?.close() }
+        serverSocket = null
+        val snapshot = activeClients.toList()
+        activeClients.clear()
+        for (client in snapshot) {
+            runCatching { client.close() }
         }
+        executor.shutdownNow()
+        Log.i("LocalSocksServer", "Local SOCKS5 server stopped")
     }
 
     private fun handleClient(client: Socket) {
@@ -65,7 +85,6 @@ class LocalSocksServer(
             // 1. SOCKS5 Handshake
             val ver = dis.read()
             if (ver != 5) {
-                client.close()
                 return
             }
             val nMethods = dis.read()
@@ -82,7 +101,6 @@ class LocalSocksServer(
             dis.read() // RSV
             val atyp = dis.read()
             if (reqVer != 5) {
-                client.close()
                 return
             }
 
@@ -104,7 +122,6 @@ class LocalSocksServer(
                     InetAddress.getByAddress(addr).hostAddress ?: ""
                 }
                 else -> {
-                    client.close()
                     return
                 }
             }
@@ -119,9 +136,10 @@ class LocalSocksServer(
                 // Command not supported
                 dos.write(byteArrayOf(0x05, 0x07, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00))
                 dos.flush()
-                client.close()
             }
         } catch (_: Throwable) {
+        } finally {
+            activeClients.remove(client)
             runCatching { client.close() }
         }
     }

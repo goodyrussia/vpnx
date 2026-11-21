@@ -26,6 +26,7 @@ object HevConfigWriter {
         tunName: String = "vpnx0",
         mtu: Int = 1400,
         ipv4: String = "10.0.0.1",
+        ipv6: String = "fc00::1",
         socksPort: Int = 10808,
         fwmark: Int = 438,
         logFile: File,
@@ -36,6 +37,7 @@ object HevConfigWriter {
               name: '$tunName'
               mtu: $mtu
               ipv4: '$ipv4'
+              ipv6: '$ipv6'
             socks5:
               port: $socksPort
               address: '127.0.0.1'

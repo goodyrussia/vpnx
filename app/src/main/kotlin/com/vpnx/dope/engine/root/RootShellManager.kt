@@ -1,9 +1,12 @@
 package com.vpnx.dope.engine.root
 
 import com.topjohnwu.superuser.Shell
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import java.util.concurrent.Executors
 
 data class ShellExecResult(
     val code: Int,
@@ -15,9 +18,15 @@ data class ShellExecResult(
 }
 
 object RootShellManager {
+    private const val DEFAULT_EXEC_TIMEOUT_MS = 10_000L
+
     private val lock = Any()
     @Volatile
     private var initialized = false
+
+    private val execExecutor = Executors.newCachedThreadPool { r ->
+        Thread(r, "RootShellExec").apply { isDaemon = true }
+    }
 
     /**
      * Configures libsu 6.0.0 exactly once from Application.onCreate() (PLAN.md section 6.1).
@@ -53,13 +62,41 @@ object RootShellManager {
     }
 
     /**
-     * Executes a shell command asynchronously on Dispatchers.IO.
+     * Executes a shell command asynchronously on Dispatchers.IO with a strict timeout.
      */
-    suspend fun exec(command: String): ShellExecResult = withContext(Dispatchers.IO) {
+    suspend fun exec(
+        command: String,
+        timeoutMs: Long = DEFAULT_EXEC_TIMEOUT_MS
+    ): ShellExecResult = withContext(Dispatchers.IO) {
         init()
-        val stdout = mutableListOf<String>()
-        val stderr = mutableListOf<String>()
-        val job = Shell.cmd(command).to(stdout, stderr).exec()
-        ShellExecResult(job.code, stdout, stderr)
+        val deferred = CompletableDeferred<ShellExecResult>()
+        val future = execExecutor.submit {
+            try {
+                val stdout = mutableListOf<String>()
+                val stderr = mutableListOf<String>()
+                val job = Shell.cmd(command).to(stdout, stderr).exec()
+                deferred.complete(ShellExecResult(job.code, stdout, stderr))
+            } catch (t: Throwable) {
+                deferred.complete(
+                    ShellExecResult(
+                        code = -1,
+                        stdout = emptyList(),
+                        stderr = listOf(t.message ?: "Root shell command failed")
+                    )
+                )
+            }
+        }
+        try {
+            withTimeout(timeoutMs) {
+                deferred.await()
+            }
+        } catch (_: TimeoutCancellationException) {
+            future.cancel(true)
+            ShellExecResult(
+                code = -1,
+                stdout = emptyList(),
+                stderr = listOf("Root command timed out after ${timeoutMs}ms: $command")
+            )
+        }
     }
 }

@@ -5,7 +5,9 @@ import android.os.Process
 import android.util.Log
 import com.vpnx.dope.engine.root.RootShellManager
 import com.vpnx.dope.engine.root.RoutingTableManager
+import com.vpnx.dope.engine.xray.XrayLogTailer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -13,6 +15,8 @@ import java.io.FileOutputStream
 object HevRootEngine {
     private const val TAG = "HevRootEngine"
     private const val CLI_NAME = "libhev-socks5-tunnel-cli.so"
+    private const val TUN_WAIT_DEADLINE_MS = 10_000L
+    private const val TUN_POLL_INTERVAL_MS = 250L
 
     @Volatile
     private var running = false
@@ -21,23 +25,31 @@ object HevRootEngine {
 
     /**
      * Resolves the executable path of hev-socks5-tunnel-cli.
-     * Searches nativeLibraryDir first; falls back to extracting from assets/filesDir.
+     * Returns null if the native library binary is missing or cannot be materialized.
      */
-    private fun resolveCliExecutable(context: Context): String {
+    private fun resolveCliExecutable(context: Context): String? {
         val libDir = File(context.applicationInfo.nativeLibraryDir)
         val cliInLib = File(libDir, CLI_NAME)
-        if (cliInLib.exists() && cliInLib.canExecute()) {
+        if (cliInLib.exists() && cliInLib.length() > 0L && cliInLib.canExecute()) {
             return cliInLib.absolutePath
         }
 
         // Extract to internal storage if not executable directly from libDir
         val target = File(context.filesDir, "hev-socks5-tunnel-cli")
-        if (!target.exists() || target.length() == 0L || (cliInLib.exists() && target.length() != cliInLib.length())) {
-            if (cliInLib.exists()) {
-                cliInLib.inputStream().use { input ->
-                    FileOutputStream(target).use { output -> input.copyTo(output) }
+        if (cliInLib.exists() && cliInLib.length() > 0L) {
+            if (!target.exists() || target.length() != cliInLib.length()) {
+                runCatching {
+                    cliInLib.inputStream().use { input ->
+                        FileOutputStream(target).use { output -> input.copyTo(output) }
+                    }
+                }.onFailure { t ->
+                    Log.e(TAG, "Failed to copy hev CLI binary to internal storage", t)
                 }
             }
+        }
+
+        if (!target.exists() || target.length() == 0L) {
+            return null
         }
         target.setExecutable(true, false)
         return target.absolutePath
@@ -51,6 +63,13 @@ object HevRootEngine {
         if (running) stop(context)
 
         val cliPath = resolveCliExecutable(context)
+        if (cliPath == null) {
+            val msg = "hev CLI executable ($CLI_NAME) not found in nativeLibraryDir or filesDir"
+            Log.e(TAG, msg)
+            XrayLogTailer.error(msg)
+            return@withContext false
+        }
+
         val configFile = File(context.filesDir, "hev.yml")
         val logFile = File(context.filesDir, "hev.log")
         val pidFile = File(context.filesDir, "hev.pid")
@@ -71,13 +90,15 @@ object HevRootEngine {
         val execRes = RootShellManager.exec(startCmd)
         if (!execRes.isSuccess) {
             Log.e(TAG, "Failed to launch hev daemon: ${execRes.output}")
+            XrayLogTailer.error("Failed to launch hev daemon: ${execRes.output}")
             return@withContext false
         }
 
-        // Wait up to 3 seconds for vpnx0 interface to appear
+        // Wait up to 10 seconds wall-clock for vpnx0 interface to appear
         var interfaceUp = false
-        for (i in 0 until 15) {
-            kotlinx.coroutines.delay(200)
+        val deadline = System.currentTimeMillis() + TUN_WAIT_DEADLINE_MS
+        while (System.currentTimeMillis() < deadline) {
+            delay(TUN_POLL_INTERVAL_MS)
             val checkRes = RootShellManager.exec("ip link show ${RoutingTableManager.TUN_DEV}")
             if (checkRes.isSuccess && checkRes.stdout.any { it.contains(RoutingTableManager.TUN_DEV) }) {
                 interfaceUp = true
@@ -86,13 +107,23 @@ object HevRootEngine {
         }
 
         if (!interfaceUp) {
-            Log.e(TAG, "hev daemon started but ${RoutingTableManager.TUN_DEV} never materialized")
+            val msg = "hev daemon started but ${RoutingTableManager.TUN_DEV} never materialized within ${TUN_WAIT_DEADLINE_MS / 1000}s"
+            Log.e(TAG, msg)
+            XrayLogTailer.error(msg)
             stop(context)
             return@withContext false
         }
 
-        // 2. Apply kernel routing rules (pref 5, 10, 20)
-        RoutingTableManager.applyRules(Process.myUid())
+        // 2. Apply kernel routing rules (pref 5, 10, 15, 20) — fail start if any rule fails
+        val rulesApplied = RoutingTableManager.applyRules(Process.myUid())
+        if (!rulesApplied) {
+            val msg = "Failed to apply kernel routing rules for ${RoutingTableManager.TUN_DEV}"
+            Log.e(TAG, msg)
+            XrayLogTailer.error(msg)
+            stop(context)
+            return@withContext false
+        }
+
         running = true
         Log.i(TAG, "Hev root mode successfully started and routed via ${RoutingTableManager.TUN_DEV}")
         true
@@ -106,7 +137,7 @@ object HevRootEngine {
         // 2. Kill hev daemon
         val pidFile = File(context.filesDir, "hev.pid")
         if (pidFile.exists()) {
-            val pid = pidFile.readText().trim()
+            val pid = runCatching { pidFile.readText().trim() }.getOrDefault("")
             if (pid.isNotEmpty()) {
                 RootShellManager.exec("kill -9 $pid 2>/dev/null")
             }

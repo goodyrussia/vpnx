@@ -34,9 +34,12 @@ class ConfigViewModel(
         }
     }
 
-    fun saveProfile(profile: ProfileEntity) {
+    fun saveProfile(profile: ProfileEntity, autoSelect: Boolean = false) {
         viewModelScope.launch {
             repository.insertProfile(profile)
+            if (autoSelect || repository.getSelectedProfileSync() == null) {
+                repository.setSelected(profile.id)
+            }
         }
     }
 
@@ -44,6 +47,7 @@ class ConfigViewModel(
         viewModelScope.launch {
             val result = repository.parseAndImportUri(rawUri)
             result.onSuccess {
+                repository.setSelected(it.id)
                 onResult(true, "Imported: ${it.name}")
             }.onFailure {
                 onResult(false, it.message ?: "Failed to import URI")

@@ -2,8 +2,9 @@ package com.vpnx.dope.engine.ssh
 
 import android.os.Build
 import android.util.Base64
-import android.util.Log
 import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
@@ -34,6 +35,10 @@ class SshTunnelSocketFactory(
     private val tlsVersion: String,
     private val socketProtectCallback: ((Socket) -> Unit)? = null
 ) : SocketFactory() {
+
+    companion object {
+        private const val HANDSHAKE_TIMEOUT_MS = 15_000
+    }
 
     override fun createSocket(): Socket = openTunneledSocket()
     override fun createSocket(host: String?, port: Int): Socket = openTunneledSocket()
@@ -72,15 +77,85 @@ class SshTunnelSocketFactory(
 
     private fun openSslSocket(rawSocket: Socket, sniHost: String, tcpPort: Int): SSLSocket {
         val sslContext = createTrustAllSslContext(tlsVersion)
-        return (sslContext.socketFactory.createSocket(rawSocket, sniHost, tcpPort, true) as SSLSocket).apply {
-            tcpNoDelay = true
-            val params = sslParameters
-            params.serverNames = listOf(SNIHostName(sniHost))
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                params.applicationProtocols = arrayOf("http/1.1")
+        val sslSocket = sslContext.socketFactory.createSocket(rawSocket, sniHost, tcpPort, true) as SSLSocket
+        val prevTimeout = sslSocket.soTimeout
+        sslSocket.tcpNoDelay = true
+        val params = sslSocket.sslParameters
+        params.serverNames = listOf(SNIHostName(sniHost))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            params.applicationProtocols = arrayOf("http/1.1")
+        }
+        sslSocket.sslParameters = params
+        sslSocket.soTimeout = HANDSHAKE_TIMEOUT_MS
+        try {
+            sslSocket.startHandshake()
+        } finally {
+            runCatching { sslSocket.soTimeout = prevTimeout }
+        }
+        return sslSocket
+    }
+
+    /**
+     * Sends HTTP CONNECT to the proxy and reads/validates the response headers through \r\n\r\n
+     * directly from the raw socket InputStream so zero subsequent bytes (SSH banner or TLS records)
+     * are over-read into a buffer.
+     */
+    private fun sendAndValidateProxyConnect(socket: Socket) {
+        val prevTimeout = socket.soTimeout
+        socket.soTimeout = HANDSHAKE_TIMEOUT_MS
+        try {
+            val connectReq = buildString {
+                append("CONNECT ").append(targetHost).append(":").append(targetPort).append(" HTTP/1.1\r\n")
+                append("Host: ").append(targetHost).append(":").append(targetPort).append("\r\n")
+                if (proxyAuth && proxyUser.isNotBlank()) {
+                    val b64 = Base64.encodeToString("$proxyUser:$proxyPass".toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+                    append("Proxy-Authorization: Basic ").append(b64).append("\r\n")
+                }
+                append("Proxy-Connection: Keep-Alive\r\n\r\n")
             }
-            sslParameters = params
-            startHandshake()
+
+            val out = socket.getOutputStream()
+            out.write(connectReq.toByteArray(Charsets.UTF_8))
+            out.flush()
+
+            val rawIn = socket.getInputStream()
+            val headerBytes = ByteArrayOutputStream(256)
+            var state = 0
+            var totalRead = 0
+            var terminated = false
+
+            while (totalRead < 8192) {
+                val b = rawIn.read()
+                if (b == -1) break
+                headerBytes.write(b)
+                totalRead++
+
+                state = when (state) {
+                    0 -> if (b == '\r'.code) 1 else 0
+                    1 -> if (b == '\n'.code) 2 else if (b == '\r'.code) 1 else 0
+                    2 -> if (b == '\r'.code) 3 else 0
+                    3 -> if (b == '\n'.code) 4 else if (b == '\r'.code) 1 else 0
+                    else -> 0
+                }
+                if (state == 4) {
+                    terminated = true
+                    break
+                }
+            }
+
+            val response = headerBytes.toString(Charsets.ISO_8859_1.name())
+            val statusLine = response.lineSequence().firstOrNull().orEmpty().trim()
+            val isHttp200 = Regex("^HTTP/1\\.[01]\\s+200(\\s|$)", RegexOption.IGNORE_CASE)
+                .containsMatchIn(statusLine)
+
+            if (!terminated || !isHttp200) {
+                runCatching { socket.close() }
+                throw IOException(
+                    "HTTP proxy CONNECT rejected (${if (statusLine.isBlank()) "empty/EOF response" else statusLine})"
+                )
+            }
+        } finally {
+            runCatching { socket.soTimeout = prevTimeout }
         }
     }
 
@@ -128,16 +203,17 @@ class SshTunnelSocketFactory(
         // 1. Establish initial TCP socket
         var activeSocket: Socket = openRawTcpSocket(connectHost, connectPort)
 
-        // 2. If Proxy mode without TLS, send proxy CONNECT if payload is empty
-        if (hasProxy && !isTls && !payloadEnabled && payloadTemplate.isBlank()) {
-            val connectReq = "CONNECT $targetHost:$targetPort HTTP/1.1\r\nHost: $targetHost:$targetPort\r\n\r\n"
-            activeSocket.getOutputStream().write(connectReq.toByteArray(Charsets.UTF_8))
-            activeSocket.getOutputStream().flush()
+        // 2. Establish HTTP CONNECT tunnel through proxy:
+        //    - PROXY_TLS always tunnels via CONNECT first before TLS handshake with target (B4)
+        //    - PROXY without payload tunnels via CONNECT and consumes the 200 response (B3)
+        val shouldSendConnect = hasProxy && (isTls || (!payloadEnabled && payloadTemplate.isBlank()))
+        if (shouldSendConnect) {
+            sendAndValidateProxyConnect(activeSocket)
         }
 
-        // 3. If TLS mode, wrap socket
+        // 3. If TLS mode, wrap socket (for PROXY_TLS this now handshakes with the target through the tunnel)
         if (isTls) {
-            activeSocket = openSslSocket(activeSocket, effectiveSni, connectPort)
+            activeSocket = openSslSocket(activeSocket, effectiveSni, targetPort)
         }
 
         val fastIn = FastPrefixInputStream(BufferedInputStream(activeSocket.getInputStream(), 65536))
@@ -153,12 +229,18 @@ class SshTunnelSocketFactory(
 
         if (effectivePayload.isNotBlank()) {
             var finalPayload = effectivePayload
-            if (hasProxy && proxyAuth && proxyUser.isNotBlank()) {
-                val b64 = Base64.encodeToString("$proxyUser:$proxyPass".toByteArray(), Base64.NO_WRAP)
+            if (hasProxy && !shouldSendConnect && proxyAuth && proxyUser.isNotBlank()) {
+                val b64 = Base64.encodeToString("$proxyUser:$proxyPass".toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
                 finalPayload = finalPayload.replaceFirst("\r\n\r\n", "\r\nProxy-Authorization: Basic $b64\r\n\r\n")
             }
-            sendPayloadChunks(activeSocket.getOutputStream(), finalPayload)
-            consumeHttpUpgrade(fastIn)
+            val prevTimeout = activeSocket.soTimeout
+            activeSocket.soTimeout = HANDSHAKE_TIMEOUT_MS
+            try {
+                sendPayloadChunks(activeSocket.getOutputStream(), finalPayload)
+                consumeHttpUpgrade(fastIn)
+            } finally {
+                runCatching { activeSocket.soTimeout = prevTimeout }
+            }
         } else {
             // Peek for SSH banner without consuming it
             val peek = ByteArray(256)

@@ -17,7 +17,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -26,7 +26,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.vpnx.dope.data.entity.ProfileEntity
 import com.vpnx.dope.ui.components.LatencyBadge
 import com.vpnx.dope.ui.screens.config.editor.ProfileEditorSheet
 import com.vpnx.dope.ui.theme.BrandBlue
@@ -49,20 +48,22 @@ fun ConfigScreen(
     val profiles by viewModel.profiles.collectAsState()
     val selectedProfile by viewModel.selectedProfile.collectAsState()
 
-    var editingProfile by remember { mutableStateOf<ProfileEntity?>(null) }
-    var isAddingNew by remember { mutableStateOf(false) }
+    var editingProfileId by rememberSaveable { mutableStateOf<String?>(null) }
+    var isAddingNew by rememberSaveable { mutableStateOf(false) }
+
+    val editingProfile = editingProfileId?.let { id -> profiles.firstOrNull { it.id == id } }
 
     if (isAddingNew || editingProfile != null) {
         ProfileEditorSheet(
             initialProfile = editingProfile,
             onSave = { profile ->
-                viewModel.saveProfile(profile)
+                viewModel.saveProfile(profile, autoSelect = isAddingNew)
                 isAddingNew = false
-                editingProfile = null
+                editingProfileId = null
             },
             onDismiss = {
                 isAddingNew = false
-                editingProfile = null
+                editingProfileId = null
             }
         )
         return
@@ -77,7 +78,7 @@ fun ConfigScreen(
                         onClick = {
                             val clipText = clipboardManager.getText()?.text.orEmpty()
                             if (clipText.isNotBlank()) {
-                                viewModel.importUri(clipText) { success, msg ->
+                                viewModel.importUri(clipText) { _, msg ->
                                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                 }
                             } else {
@@ -184,7 +185,7 @@ fun ConfigScreen(
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Button(
-                                    onClick = { editingProfile = p },
+                                    onClick = { editingProfileId = p.id },
                                     colors = ButtonDefaults.buttonColors(color = BrandBlue.copy(alpha = 0.12f))
                                 ) {
                                     Text("Edit", fontSize = 11.sp, color = BrandBlue)

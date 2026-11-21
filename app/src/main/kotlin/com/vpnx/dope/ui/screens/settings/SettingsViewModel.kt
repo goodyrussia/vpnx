@@ -44,14 +44,25 @@ class SettingsViewModel(
     }
 
     fun updateMtu(mtu: Int) {
+        val clamped = mtu.coerceIn(SettingsRepository.MIN_MTU, SettingsRepository.MAX_MTU)
         viewModelScope.launch {
-            repository.updateSettings(settings.value.copy(tunnelMtu = mtu))
+            repository.updateSettings(settings.value.copy(tunnelMtu = clamped))
         }
     }
 
     fun updateDns(primary: String, secondary: String) {
+        val trimmedPrimary = primary.trim()
+        val trimmedSecondary = secondary.trim()
+        if (!SettingsRepository.isValidDnsServer(trimmedPrimary)) return
+        if (trimmedSecondary.isNotEmpty() && !SettingsRepository.isValidDnsServer(trimmedSecondary)) return
+
         viewModelScope.launch {
-            repository.updateSettings(settings.value.copy(primaryDns = primary, secondaryDns = secondary))
+            repository.updateSettings(
+                settings.value.copy(
+                    primaryDns = trimmedPrimary,
+                    secondaryDns = trimmedSecondary
+                )
+            )
         }
     }
 

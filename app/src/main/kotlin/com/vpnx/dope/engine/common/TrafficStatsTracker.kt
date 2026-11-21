@@ -16,9 +16,10 @@ object TrafficStatsTracker {
     private val totalTx = AtomicLong(0L)
     private val totalRx = AtomicLong(0L)
 
-    private var lastTx = 0L
-    private var lastRx = 0L
-    private var lastTickMs = System.currentTimeMillis()
+    private val tickLock = Any()
+    private val lastTx = AtomicLong(0L)
+    private val lastRx = AtomicLong(0L)
+    private val lastTickMs = AtomicLong(System.nanoTime() / 1_000_000L)
 
     private val _stats = MutableStateFlow(TrafficStats())
     val stats: StateFlow<TrafficStats> = _stats.asStateFlow()
@@ -32,32 +33,36 @@ object TrafficStatsTracker {
     }
 
     fun tick() {
-        val now = System.currentTimeMillis()
-        val dt = (now - lastTickMs).coerceAtLeast(1)
-        val curTx = totalTx.get()
-        val curRx = totalRx.get()
+        synchronized(tickLock) {
+            val now = System.nanoTime() / 1_000_000L
+            val dt = (now - lastTickMs.get()).coerceAtLeast(1L)
+            val curTx = totalTx.get()
+            val curRx = totalRx.get()
 
-        val txSpeed = ((curTx - lastTx) * 1000) / dt
-        val rxSpeed = ((curRx - lastRx) * 1000) / dt
+            val txSpeed = ((curTx - lastTx.get()) * 1000L) / dt
+            val rxSpeed = ((curRx - lastRx.get()) * 1000L) / dt
 
-        lastTx = curTx
-        lastRx = curRx
-        lastTickMs = now
+            lastTx.set(curTx)
+            lastRx.set(curRx)
+            lastTickMs.set(now)
 
-        _stats.value = TrafficStats(
-            txBytes = curTx,
-            rxBytes = curRx,
-            txSpeedBps = txSpeed.coerceAtLeast(0),
-            rxSpeedBps = rxSpeed.coerceAtLeast(0)
-        )
+            _stats.value = TrafficStats(
+                txBytes = curTx,
+                rxBytes = curRx,
+                txSpeedBps = txSpeed.coerceAtLeast(0L),
+                rxSpeedBps = rxSpeed.coerceAtLeast(0L)
+            )
+        }
     }
 
     fun reset() {
-        totalTx.set(0L)
-        totalRx.set(0L)
-        lastTx = 0L
-        lastRx = 0L
-        lastTickMs = System.currentTimeMillis()
-        _stats.value = TrafficStats()
+        synchronized(tickLock) {
+            totalTx.set(0L)
+            totalRx.set(0L)
+            lastTx.set(0L)
+            lastRx.set(0L)
+            lastTickMs.set(System.nanoTime() / 1_000_000L)
+            _stats.value = TrafficStats()
+        }
     }
 }

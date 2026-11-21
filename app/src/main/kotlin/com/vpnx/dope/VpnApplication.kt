@@ -8,6 +8,7 @@ import android.os.Build
 import android.util.Log
 import com.vpnx.dope.data.AppDatabase
 import com.vpnx.dope.engine.root.RootShellManager
+import com.vpnx.dope.engine.xray.XrayEngine
 import com.vpnx.dope.engine.xray.XrayLogTailer
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.io.File
@@ -43,6 +44,13 @@ class VpnApplication : Application() {
 
         // 4. Create Notification Channels
         createNotificationChannels()
+
+        // 5. Initialize Xray-core environment once at startup (idempotent)
+        try {
+            XrayEngine.initCoreEnv(this)
+        } catch (t: Throwable) {
+            Log.e("VpnApplication", "Failed to pre-initialize Xray core environment", t)
+        }
     }
 
     private fun setupCrashDiagnostics() {

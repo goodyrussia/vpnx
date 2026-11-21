@@ -19,6 +19,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 object SshEngine {
     private const val TAG = "SshEngine"
+    private const val SSH_CONNECT_TIMEOUT_MS = 15_000
+    private const val SSH_OPERATION_TIMEOUT_MS = 30_000
 
     @Volatile
     var vpnService: VpnService? = null
@@ -37,8 +39,8 @@ object SshEngine {
                     override fun verify(hostname: String?, port: Int, key: PublicKey?): Boolean = true
                     override fun findExistingAlgorithms(hostname: String?, port: Int): List<String> = emptyList()
                 })
-                connectTimeout = 15000
-                timeout = 0
+                connectTimeout = SSH_CONNECT_TIMEOUT_MS
+                timeout = SSH_OPERATION_TIMEOUT_MS
                 socketFactory = SshTunnelSocketFactory(
                     mode = profile.mode,
                     targetHost = profile.server,

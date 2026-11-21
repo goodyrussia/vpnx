@@ -9,12 +9,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.vpnx.dope.data.repository.SettingsRepository
+import com.vpnx.dope.ui.components.VpnxDropdownPreference
 import com.vpnx.dope.ui.theme.StatusAmber
 import com.vpnx.dope.ui.theme.StatusGreen
 import com.vpnx.dope.ui.theme.StatusRed
@@ -24,7 +30,6 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.preference.ArrowPreference
-import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
@@ -34,6 +39,38 @@ fun SettingsScreen(
 ) {
     val settings by viewModel.settings.collectAsState()
     val rootAvailable by viewModel.rootAvailable.collectAsState()
+
+    var mtuText by rememberSaveable { mutableStateOf(settings.tunnelMtu.toString()) }
+    var primaryDnsText by rememberSaveable { mutableStateOf(settings.primaryDns) }
+    var secondaryDnsText by rememberSaveable { mutableStateOf(settings.secondaryDns) }
+
+    LaunchedEffect(settings.tunnelMtu) {
+        if (mtuText.trim().toIntOrNull() == settings.tunnelMtu) return@LaunchedEffect
+        if (mtuText.trim().toIntOrNull()?.let { SettingsRepository.isValidMtu(it) } == true) {
+            mtuText = settings.tunnelMtu.toString()
+        }
+    }
+
+    val parsedMtu = mtuText.trim().toIntOrNull()
+    val mtuError = if (parsedMtu == null || !SettingsRepository.isValidMtu(parsedMtu)) {
+        "MTU must be between ${SettingsRepository.MIN_MTU} and ${SettingsRepository.MAX_MTU}"
+    } else {
+        null
+    }
+
+    val primaryDnsError = if (!SettingsRepository.isValidDnsServer(primaryDnsText)) {
+        "Enter a valid IP address or hostname"
+    } else {
+        null
+    }
+
+    val secondaryDnsError = if (
+        secondaryDnsText.isNotBlank() && !SettingsRepository.isValidDnsServer(secondaryDnsText)
+    ) {
+        "Enter a valid IP address or hostname (or leave blank)"
+    } else {
+        null
+    }
 
     val modeOptions = listOf("VPN Service", "Root (hev)")
     val selectedModeIdx = if (settings.tunnelMode == "ROOT") 1 else 0
@@ -69,12 +106,11 @@ fun SettingsScreen(
             )
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-                    OverlayDropdownPreference(
+                    VpnxDropdownPreference(
                         items = modeOptions,
                         selectedIndex = selectedModeIdx.coerceIn(modeOptions.indices),
                         title = "Tunnel Mode",
                         summary = if (settings.tunnelMode == "ROOT") "High-speed kernel TUN routing" else "Standard non-root Android VpnService",
-                        renderInRootScaffold = false,
                         onSelectedIndexChange = { idx ->
                             viewModel.updateTunnelMode(if (idx == 1) "ROOT" else "VPN")
                         }
@@ -97,11 +133,25 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.height(8.dp))
 
                     TextField(
-                        value = settings.tunnelMtu.toString(),
-                        onValueChange = { viewModel.updateMtu(it.toIntOrNull() ?: 1400) },
-                        label = "Tunnel MTU (default 1400)",
+                        value = mtuText,
+                        onValueChange = { raw ->
+                            mtuText = raw
+                            val parsed = raw.trim().toIntOrNull()
+                            if (parsed != null && SettingsRepository.isValidMtu(parsed)) {
+                                viewModel.updateMtu(parsed)
+                            }
+                        },
+                        label = "Tunnel MTU (${SettingsRepository.MIN_MTU}–${SettingsRepository.MAX_MTU}, default 1400)",
                         modifier = Modifier.fillMaxWidth()
                     )
+                    if (mtuError != null) {
+                        Text(
+                            text = mtuError,
+                            color = StatusRed,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(top = 4.dp, start = 4.dp)
+                        )
+                    }
                 }
             }
 
@@ -143,18 +193,54 @@ fun SettingsScreen(
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
                     TextField(
-                        value = settings.primaryDns,
-                        onValueChange = { viewModel.updateDns(it, settings.secondaryDns) },
+                        value = primaryDnsText,
+                        onValueChange = { raw ->
+                            primaryDnsText = raw
+                            if (SettingsRepository.isValidDnsServer(raw)) {
+                                val sec = if (secondaryDnsText.isBlank() || SettingsRepository.isValidDnsServer(secondaryDnsText)) {
+                                    secondaryDnsText
+                                } else {
+                                    settings.secondaryDns
+                                }
+                                viewModel.updateDns(raw, sec)
+                            }
+                        },
                         label = "Primary DNS Server",
                         modifier = Modifier.fillMaxWidth()
                     )
+                    if (primaryDnsError != null) {
+                        Text(
+                            text = primaryDnsError,
+                            color = StatusRed,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(top = 4.dp, start = 4.dp)
+                        )
+                    }
                     Spacer(modifier = Modifier.height(10.dp))
                     TextField(
-                        value = settings.secondaryDns,
-                        onValueChange = { viewModel.updateDns(settings.primaryDns, it) },
+                        value = secondaryDnsText,
+                        onValueChange = { raw ->
+                            secondaryDnsText = raw
+                            if (raw.isBlank() || SettingsRepository.isValidDnsServer(raw)) {
+                                val pri = if (SettingsRepository.isValidDnsServer(primaryDnsText)) {
+                                    primaryDnsText
+                                } else {
+                                    settings.primaryDns
+                                }
+                                viewModel.updateDns(pri, raw)
+                            }
+                        },
                         label = "Secondary DNS Server",
                         modifier = Modifier.fillMaxWidth()
                     )
+                    if (secondaryDnsError != null) {
+                        Text(
+                            text = secondaryDnsError,
+                            color = StatusRed,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(top = 4.dp, start = 4.dp)
+                        )
+                    }
                 }
             }
 
@@ -184,11 +270,10 @@ fun SettingsScreen(
                         summary = "Keep CPU active during high-bandwidth background streaming"
                     )
                     Spacer(modifier = Modifier.height(10.dp))
-                    OverlayDropdownPreference(
+                    VpnxDropdownPreference(
                         items = themeOptions,
                         selectedIndex = selectedThemeIdx.coerceIn(themeOptions.indices),
                         title = "App Theme",
-                        renderInRootScaffold = false,
                         onSelectedIndexChange = { idx ->
                             viewModel.updateTheme(when (idx) {
                                 1 -> "LIGHT"

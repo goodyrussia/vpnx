@@ -23,7 +23,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -37,6 +39,7 @@ import com.vpnx.dope.ui.theme.BrandBlue
 import com.vpnx.dope.ui.theme.StatusAmber
 import com.vpnx.dope.ui.theme.StatusGreen
 import com.vpnx.dope.ui.theme.StatusRed
+import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
@@ -54,9 +57,28 @@ fun LogsScreen(
     val filter by viewModel.selectedFilter.collectAsState()
 
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
     var autoScroll by remember { mutableStateOf(true) }
 
-    LaunchedEffect(logs.size) {
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            val layoutInfo = listState.layoutInfo
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val totalItems = layoutInfo.totalItemsCount
+            Triple(listState.isScrollInProgress, lastVisible, totalItems)
+        }.collect { (isScrolling, lastVisible, totalItems) ->
+            if (isScrolling && totalItems > 0) {
+                val atBottom = lastVisible >= totalItems - 1
+                if (!atBottom && autoScroll) {
+                    autoScroll = false
+                } else if (atBottom && !autoScroll) {
+                    autoScroll = true
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(logs.size, autoScroll) {
         if (autoScroll && logs.isNotEmpty()) {
             listState.animateScrollToItem(logs.size - 1)
         }
@@ -98,7 +120,7 @@ fun LogsScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Filter Chips
+            // Filter Chips + Auto-scroll Pause/Follow toggle
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -119,6 +141,27 @@ fun LogsScreen(
                             fontSize = 12.sp
                         )
                     }
+                }
+
+                Button(
+                    onClick = {
+                        val next = !autoScroll
+                        autoScroll = next
+                        if (next && logs.isNotEmpty()) {
+                            coroutineScope.launch {
+                                listState.animateScrollToItem(logs.size - 1)
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        color = if (autoScroll) StatusGreen.copy(alpha = 0.15f) else StatusAmber.copy(alpha = 0.18f)
+                    )
+                ) {
+                    Text(
+                        text = if (autoScroll) "Auto-scroll: On" else "Paused",
+                        color = if (autoScroll) StatusGreen else StatusAmber,
+                        fontSize = 12.sp
+                    )
                 }
             }
 

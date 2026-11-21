@@ -26,7 +26,15 @@ data class XrayProfile(
     val hy2DownBandwidth: Int,
     val hy2Ports: String,
     val hy2ObfsType: String,
-    val hy2ObfsPassword: String
+    val hy2ObfsPassword: String,
+    val realityPublicKey: String = "",
+    val realityShortId: String = "",
+    val realitySpiderX: String = "",
+    val grpcServiceName: String = "",
+    val httpUpgradePath: String = "",
+    val httpUpgradeHost: String = "",
+    val hy2PinSha256: String = "",
+    val hy2HopInterval: String = ""
 ) {
     fun toEntity(isSelected: Boolean = false): ProfileEntity = ProfileEntity(
         id = id,
@@ -43,9 +51,15 @@ data class XrayProfile(
         alpn = alpn,
         fingerprint = fingerprint,
         allowInsecure = allowInsecure,
+        realityPublicKey = realityPublicKey,
+        realityShortId = realityShortId,
+        realitySpiderX = realitySpiderX,
         transport = transport,
         wsPath = wsPath,
         wsHost = wsHost,
+        grpcServiceName = grpcServiceName,
+        httpUpgradePath = httpUpgradePath,
+        httpUpgradeHost = httpUpgradeHost,
         ssMethod = ssMethod,
         ssPassword = ssPassword,
         trojanPassword = trojanPassword,
@@ -54,7 +68,9 @@ data class XrayProfile(
         hy2DownBandwidth = hy2DownBandwidth,
         hy2Ports = hy2Ports,
         hy2ObfsType = hy2ObfsType,
-        hy2ObfsPassword = hy2ObfsPassword
+        hy2ObfsPassword = hy2ObfsPassword,
+        hy2PinSha256 = hy2PinSha256,
+        hy2HopInterval = hy2HopInterval
     )
 
     companion object {
@@ -82,7 +98,15 @@ data class XrayProfile(
             hy2DownBandwidth = e.hy2DownBandwidth,
             hy2Ports = e.hy2Ports,
             hy2ObfsType = e.hy2ObfsType,
-            hy2ObfsPassword = e.hy2ObfsPassword
+            hy2ObfsPassword = e.hy2ObfsPassword,
+            realityPublicKey = e.realityPublicKey,
+            realityShortId = e.realityShortId,
+            realitySpiderX = e.realitySpiderX,
+            grpcServiceName = e.grpcServiceName,
+            httpUpgradePath = e.httpUpgradePath,
+            httpUpgradeHost = e.httpUpgradeHost,
+            hy2PinSha256 = e.hy2PinSha256,
+            hy2HopInterval = e.hy2HopInterval
         )
     }
 }

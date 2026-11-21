@@ -6,6 +6,8 @@ import org.json.JSONObject
 
 object XrayConfigBuilder {
 
+    private const val DEFAULT_HY2_HOP_INTERVAL_SECONDS = 30
+
     /**
      * Builds a strictly routing-free Xray JSON configuration.
      * Contains ONLY:
@@ -43,7 +45,8 @@ object XrayConfigBuilder {
         val proxyOutbound = JSONObject()
         proxyOutbound.put("tag", "proxy")
 
-        when (profile.protocol.uppercase()) {
+        val protocolUpper = profile.protocol.uppercase()
+        when (protocolUpper) {
             "VLESS" -> buildVlessOutbound(proxyOutbound, profile)
             "VMESS" -> buildVmessOutbound(proxyOutbound, profile)
             "TROJAN" -> buildTrojanOutbound(proxyOutbound, profile)
@@ -52,41 +55,80 @@ object XrayConfigBuilder {
             else -> buildVlessOutbound(proxyOutbound, profile)
         }
 
-        // Stream Settings (TLS, WebSocket, Transport)
-        val streamSettings = JSONObject()
-        val net = profile.transport.lowercase().ifBlank { "tcp" }
-        streamSettings.put("network", net)
+        // Hysteria2 constructs its own Xray hysteria streamSettings + finalmask
+        if (protocolUpper != "HYSTERIA2") {
+            val streamSettings = JSONObject()
+            val net = profile.transport.lowercase().ifBlank { "tcp" }
+            streamSettings.put("network", net)
 
-        if (profile.security.equals("tls", ignoreCase = true) || profile.security.equals("reality", ignoreCase = true)) {
-            streamSettings.put("security", profile.security.lowercase())
-            val tlsSettings = JSONObject()
-            val sni = profile.sni.ifBlank { profile.server }
-            tlsSettings.put("serverName", sni)
-            tlsSettings.put("allowInsecure", profile.allowInsecure)
-            tlsSettings.put("fingerprint", profile.fingerprint.ifBlank { "chrome" })
+            when (profile.security.lowercase()) {
+                "tls" -> {
+                    streamSettings.put("security", "tls")
+                    val tlsSettings = JSONObject()
+                    val sni = profile.sni.ifBlank { profile.server }
+                    tlsSettings.put("serverName", sni)
+                    tlsSettings.put("allowInsecure", profile.allowInsecure)
+                    tlsSettings.put("fingerprint", profile.fingerprint.ifBlank { "chrome" })
 
-            val alpnArray = JSONArray()
-            profile.alpn.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach {
-                alpnArray.put(it)
+                    val alpnArray = JSONArray()
+                    profile.alpn.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach {
+                        alpnArray.put(it)
+                    }
+                    if (alpnArray.length() > 0) {
+                        tlsSettings.put("alpn", alpnArray)
+                    }
+                    streamSettings.put("tlsSettings", tlsSettings)
+                }
+                "reality" -> {
+                    streamSettings.put("security", "reality")
+                    val realitySettings = JSONObject()
+                    val sni = profile.sni.ifBlank { profile.server }
+                    realitySettings.put("serverName", sni)
+                    realitySettings.put("fingerprint", profile.fingerprint.ifBlank { "chrome" })
+                    realitySettings.put("publicKey", profile.realityPublicKey.trim())
+                    realitySettings.put("shortId", profile.realityShortId.trim())
+                    if (profile.realitySpiderX.isNotBlank()) {
+                        realitySettings.put("spiderX", profile.realitySpiderX.trim())
+                    }
+                    realitySettings.put("show", false)
+                    streamSettings.put("realitySettings", realitySettings)
+                }
+                else -> {
+                    streamSettings.put("security", "none")
+                }
             }
-            if (alpnArray.length() > 0) {
-                tlsSettings.put("alpn", alpnArray)
+
+            when (net) {
+                "ws" -> {
+                    val wsSettings = JSONObject()
+                    wsSettings.put("path", profile.wsPath.ifBlank { "/" })
+                    val headers = JSONObject()
+                    headers.put("Host", profile.wsHost.ifBlank { profile.sni.ifBlank { profile.server } })
+                    wsSettings.put("headers", headers)
+                    streamSettings.put("wsSettings", wsSettings)
+                }
+                "grpc" -> {
+                    val grpcSettings = JSONObject()
+                    grpcSettings.put("serviceName", profile.grpcServiceName.trim())
+                    streamSettings.put("grpcSettings", grpcSettings)
+                }
+                "httpupgrade" -> {
+                    val httpUpgradeSettings = JSONObject()
+                    val path = profile.httpUpgradePath.ifBlank { profile.wsPath.ifBlank { "/" } }
+                    val host = profile.httpUpgradeHost.ifBlank {
+                        profile.wsHost.ifBlank { profile.sni.ifBlank { profile.server } }
+                    }
+                    httpUpgradeSettings.put("path", path)
+                    if (host.isNotBlank()) {
+                        httpUpgradeSettings.put("host", host)
+                    }
+                    streamSettings.put("httpupgradeSettings", httpUpgradeSettings)
+                }
             }
-            streamSettings.put("tlsSettings", tlsSettings)
-        } else {
-            streamSettings.put("security", "none")
+
+            proxyOutbound.put("streamSettings", streamSettings)
         }
 
-        if (net == "ws") {
-            val wsSettings = JSONObject()
-            wsSettings.put("path", profile.wsPath.ifBlank { "/" })
-            val headers = JSONObject()
-            headers.put("Host", profile.wsHost.ifBlank { profile.sni.ifBlank { profile.server } })
-            wsSettings.put("headers", headers)
-            streamSettings.put("wsSettings", wsSettings)
-        }
-
-        proxyOutbound.put("streamSettings", streamSettings)
         outboundsArray.put(proxyOutbound)
         root.put("outbounds", outboundsArray)
 
@@ -106,7 +148,16 @@ object XrayConfigBuilder {
         userObj.put("id", profile.uuid)
         userObj.put("encryption", "none")
         if (profile.flow.isNotBlank()) {
-            userObj.put("flow", profile.flow)
+            val net = profile.transport.lowercase().ifBlank { "tcp" }
+            val sec = profile.security.lowercase()
+            val flowSupported = (net == "tcp" || net == "raw") && (sec == "tls" || sec == "reality")
+            if (flowSupported) {
+                userObj.put("flow", profile.flow.trim())
+            } else {
+                XrayLogTailer.warn(
+                    "Omitting VLESS flow '${profile.flow}' because it requires tcp/raw + tls/reality (got $net/$sec)"
+                )
+            }
         }
         users.put(userObj)
         serverObj.put("users", users)
@@ -162,19 +213,91 @@ object XrayConfigBuilder {
         outbound.put("settings", settings)
     }
 
+    /**
+     * Xray-core Hysteria2 outbound schema (matching AsteriskNG Hysteria2.toXrayOutbound):
+     * protocol = "hysteria", settings = { version: 2, address, port },
+     * streamSettings = { network: "hysteria", hysteriaSettings: { version: 2, auth },
+     * security: "tls", tlsSettings, finalmask }.
+     */
     private fun buildHysteria2Outbound(outbound: JSONObject, profile: XrayProfile) {
-        outbound.put("protocol", "hysteria2")
+        outbound.put("protocol", "hysteria")
+
         val settings = JSONObject()
-        val servers = JSONArray()
-        val serverObj = JSONObject()
-        serverObj.put("address", profile.server)
-        serverObj.put("port", profile.port)
-        serverObj.put("password", profile.hy2Auth)
-        if (profile.hy2UpBandwidth > 0) serverObj.put("up_mbps", profile.hy2UpBandwidth)
-        if (profile.hy2DownBandwidth > 0) serverObj.put("down_mbps", profile.hy2DownBandwidth)
-        if (profile.hy2Ports.isNotBlank()) serverObj.put("ports", profile.hy2Ports)
-        servers.put(serverObj)
-        settings.put("servers", servers)
+        settings.put("version", 2)
+        settings.put("address", profile.server)
+        settings.put("port", profile.port)
         outbound.put("settings", settings)
+
+        val streamSettings = JSONObject()
+        streamSettings.put("network", "hysteria")
+
+        val hysteriaSettings = JSONObject()
+        hysteriaSettings.put("version", 2)
+        hysteriaSettings.put("auth", profile.hy2Auth)
+        streamSettings.put("hysteriaSettings", hysteriaSettings)
+
+        streamSettings.put("security", "tls")
+        val tlsSettings = JSONObject()
+        val sni = profile.sni.ifBlank { profile.server }
+        if (sni.isNotBlank()) {
+            tlsSettings.put("serverName", sni)
+        }
+        if (profile.hy2PinSha256.isNotBlank()) {
+            tlsSettings.put("pinnedPeerCertSha256", profile.hy2PinSha256.trim())
+        }
+        if (profile.allowInsecure) {
+            tlsSettings.put("allowInsecure", true)
+        }
+        streamSettings.put("tlsSettings", tlsSettings)
+
+        val finalMask = JSONObject()
+        if (profile.hy2UpBandwidth > 0 || profile.hy2DownBandwidth > 0) {
+            val quicParams = JSONObject()
+            quicParams.put("congestion", "brutal")
+            if (profile.hy2UpBandwidth > 0) {
+                quicParams.put("brutalUp", "${profile.hy2UpBandwidth} mbps")
+            }
+            if (profile.hy2DownBandwidth > 0) {
+                quicParams.put("brutalDown", "${profile.hy2DownBandwidth} mbps")
+            }
+            finalMask.put("quicParams", quicParams)
+        }
+
+        val useSalamander = profile.hy2ObfsType.equals("salamander", ignoreCase = true) &&
+            profile.hy2ObfsPassword.isNotBlank()
+        val mport = profile.hy2Ports.trim()
+        if (useSalamander || mport.isNotBlank()) {
+            val udpArray = JSONArray()
+            if (useSalamander) {
+                val salamanderObj = JSONObject()
+                salamanderObj.put("type", "salamander")
+                val salSettings = JSONObject()
+                salSettings.put("password", profile.hy2ObfsPassword)
+                salamanderObj.put("settings", salSettings)
+                udpArray.put(salamanderObj)
+            }
+            if (mport.isNotBlank()) {
+                // Xray wraps masks in reverse order; udphop must be outermost.
+                val udpHopObj = JSONObject()
+                udpHopObj.put("type", "udphop")
+                val hopSettings = JSONObject()
+                hopSettings.put("mode", "intervalLocal,intervalRemote")
+                hopSettings.put("remotePorts", mport)
+                hopSettings.put(
+                    "interval",
+                    profile.hy2HopInterval.trim().toIntOrNull()?.takeIf { it > 0 }
+                        ?: DEFAULT_HY2_HOP_INTERVAL_SECONDS
+                )
+                udpHopObj.put("settings", hopSettings)
+                udpArray.put(udpHopObj)
+            }
+            finalMask.put("udp", udpArray)
+        }
+
+        if (finalMask.length() > 0) {
+            streamSettings.put("finalmask", finalMask)
+        }
+
+        outbound.put("streamSettings", streamSettings)
     }
 }

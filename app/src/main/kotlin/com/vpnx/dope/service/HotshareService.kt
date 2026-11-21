@@ -10,20 +10,24 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.vpnx.dope.R
 import com.vpnx.dope.VpnApplication
+import com.vpnx.dope.engine.xray.XrayLogTailer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 class HotshareService : Service() {
 
-    private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var serverSocket: ServerSocket? = null
     private val isRunning = AtomicBoolean(false)
+    private val activeSockets = ConcurrentHashMap.newKeySet<Socket>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -36,6 +40,7 @@ class HotshareService : Service() {
         startForegroundCompat(createNotification("Hotspot proxy active on port 10809"))
         if (intent?.action == ACTION_STOP) {
             stopServer()
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -51,20 +56,33 @@ class HotshareService : Service() {
                     server.reuseAddress = true
                     server.bind(InetSocketAddress("0.0.0.0", 10809), 128)
                     serverSocket = server
+                    XrayLogTailer.info("Hotshare proxy listening on 0.0.0.0:10809")
                     while (isRunning.get()) {
                         val client = server.accept()
+                        activeSockets.add(client)
                         serviceScope.launch { forwardClient(client) }
                     }
                 } catch (t: Throwable) {
-                    Log.d("HotshareService", "Hotshare server loop notice: ${t.message}")
+                    if (isRunning.get()) {
+                        XrayLogTailer.error("Hotshare proxy failed: ${t.message}")
+                        Log.e("HotshareService", "Hotshare server loop failed", t)
+                    } else {
+                        Log.d("HotshareService", "Hotshare server stopped: ${t.message}")
+                    }
+                } finally {
+                    isRunning.set(false)
+                    runCatching { serverSocket?.close() }
+                    serverSocket = null
                 }
             }
         }
     }
 
     private fun forwardClient(client: Socket) {
+        var upstream: Socket? = null
         try {
-            val upstream = Socket()
+            upstream = Socket()
+            activeSockets.add(upstream)
             upstream.connect(InetSocketAddress("127.0.0.1", 10808), 5000)
 
             val cin = client.getInputStream()
@@ -102,6 +120,11 @@ class HotshareService : Service() {
             t2.join()
         } catch (_: Throwable) {
         } finally {
+            upstream?.let {
+                activeSockets.remove(it)
+                runCatching { it.close() }
+            }
+            activeSockets.remove(client)
             runCatching { client.close() }
         }
     }
@@ -110,6 +133,11 @@ class HotshareService : Service() {
         isRunning.set(false)
         runCatching { serverSocket?.close() }
         serverSocket = null
+        val snapshot = activeSockets.toList()
+        activeSockets.clear()
+        for (sock in snapshot) {
+            runCatching { sock.close() }
+        }
     }
 
     private fun startForegroundCompat(notification: Notification) {
@@ -141,6 +169,7 @@ class HotshareService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopServer()
+        serviceScope.cancel()
     }
 
     companion object {

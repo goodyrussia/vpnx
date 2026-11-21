@@ -1,45 +1,59 @@
 package com.vpnx.dope.service
 
 import android.content.Intent
+import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Thread-safe permission requester bridging ActivityResultLauncher with coroutines.
- * Matches AsteriskNG AndroidVpnPermissionRequester pattern.
+ * Thread-safe single-flight permission requester bridging ActivityResultLauncher with coroutines.
+ * Avoids holding a Mutex across the user-prompt await and guards against Activity-destroyed launcher races.
  */
 class VpnPermissionRequester {
-    private val mutex = Mutex()
-    private var launcher: ((Intent) -> Unit)? = null
-    private var pendingResult: CompletableDeferred<Boolean>? = null
+
+    private val launcherRef = AtomicReference<((Intent) -> Unit)?>(null)
+    private val inFlightRef = AtomicReference<CompletableDeferred<Boolean>?>(null)
 
     fun registerLauncher(launcher: ((Intent) -> Unit)?) {
-        this.launcher = launcher
+        launcherRef.set(launcher)
     }
 
     fun complete(granted: Boolean) {
-        pendingResult?.complete(granted)
-        pendingResult = null
+        inFlightRef.getAndSet(null)?.complete(granted)
     }
 
     suspend fun request(intent: Intent): Boolean {
-        return mutex.withLock {
-            val currentLauncher = launcher ?: return false
-            val result = CompletableDeferred<Boolean>()
-            pendingResult = result
-            try {
-                withContext(Dispatchers.Main.immediate) {
-                    currentLauncher(intent)
-                }
-                result.await()
-            } finally {
-                if (pendingResult === result) {
-                    pendingResult = null
-                }
-            }
+        val newDeferred = CompletableDeferred<Boolean>()
+        if (!inFlightRef.compareAndSet(null, newDeferred)) {
+            // Single-flight: piggyback on the existing in-flight prompt without blocking on a lock
+            return inFlightRef.get()?.await() ?: false
         }
+
+        val currentLauncher = launcherRef.get()
+        if (currentLauncher == null) {
+            inFlightRef.compareAndSet(newDeferred, null)
+            newDeferred.complete(false)
+            return false
+        }
+
+        try {
+            withContext(Dispatchers.Main.immediate) {
+                currentLauncher(intent)
+            }
+            return newDeferred.await()
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed to launch OS VPN permission prompt", t)
+            inFlightRef.compareAndSet(newDeferred, null)
+            newDeferred.complete(false)
+            return false
+        } finally {
+            inFlightRef.compareAndSet(newDeferred, null)
+        }
+    }
+
+    companion object {
+        private const val TAG = "VpnPermissionRequester"
     }
 }
